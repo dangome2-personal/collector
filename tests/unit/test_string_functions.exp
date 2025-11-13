@@ -52,10 +52,10 @@ test_case "validates IP address format" {
     set valid_ip "192.168.1.1"
     set invalid_ip "999.999.999.999"
     
-    # Simple regex for IP validation
-    set ip_pattern {^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$}
+    # Use regexp for IP validation in Tcl
+    set matched [regexp {^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$} $valid_ip]
     
-    assert_match $valid_ip $ip_pattern "Valid IP should match pattern"
+    assert_true $matched "Valid IP should match pattern"
 }
 
 # Test Case 7: Trim whitespace
