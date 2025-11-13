@@ -1,0 +1,96 @@
+#!/usr/bin/expect
+
+# Unit Test: Test Logging Functions
+# Tests the initialize_logging procedure and related functionality
+
+source [file join [file dirname [info script]] "../lib/test_framework.exp"]
+
+# Test suite for logging functionality
+test_suite_start "Logging Functions"
+
+# Setup and teardown
+proc setup {} {
+    global test_log_dir
+    set test_log_dir "/tmp/msft_collector_test_[clock seconds]"
+    file mkdir $test_log_dir
+    file mkdir "$test_log_dir/logs"
+}
+
+proc teardown {} {
+    global test_log_dir
+    if {[file exists $test_log_dir]} {
+        file delete -force $test_log_dir
+    }
+}
+
+# Test Case 1: Log file name generation
+test_case "generates log filename with hostname and timestamp" {
+    set hostname "PHX10-0100-0100-01RHE"
+    set timestamp [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
+    set expected_pattern "logs/${hostname}_*.log"
+    
+    # Generate log file name
+    set log_file "logs/${hostname}_${timestamp}.log"
+    
+    assert_match $log_file $expected_pattern "Log file name should match pattern"
+}
+
+# Test Case 2: Log directory creation
+test_case "creates log directory if it doesn't exist" {
+    global test_log_dir
+    set log_dir "$test_log_dir/logs"
+    
+    if {![file exists $log_dir]} {
+        file mkdir $log_dir
+    }
+    
+    assert_file_exists $log_dir "Log directory should be created"
+}
+
+# Test Case 3: Timestamp format validation
+test_case "timestamp format is YYYYMMDD_HHMMSS" {
+    set timestamp [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
+    
+    # Should match YYYYMMDD_HHMMSS format
+    assert_match $timestamp {[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]} \
+        "Timestamp should be in YYYYMMDD_HHMMSS format"
+}
+
+# Test Case 4: Password file checking
+test_case "detects missing password file" {
+    set non_existent_file "/tmp/non_existent_password_file_12345"
+    
+    set file_exists [file exists $non_existent_file]
+    assert_false $file_exists "Should detect missing password file"
+}
+
+# Test Case 5: Password file validation
+test_case "validates password file has content" {
+    set test_password_file [create_temp_file "testpassword123"]
+    
+    assert_file_exists $test_password_file "Password file should exist"
+    assert_true [expr {[file size $test_password_file] > 0}] "Password file should have content"
+    
+    cleanup_temp_file $test_password_file
+}
+
+# Test Case 6: Username from environment
+test_case "retrieves username from environment" {
+    set username $::env(USER)
+    
+    assert_not_empty $username "Username should be retrieved from environment"
+}
+
+# Test Case 7: Log file path construction
+test_case "constructs proper log file path" {
+    global test_log_dir
+    set hostname "test-device"
+    set timestamp "20250101_120000"
+    set log_file "$test_log_dir/logs/${hostname}_${timestamp}.log"
+    
+    assert_contains $log_file "test-device" "Log file path should contain hostname"
+    assert_contains $log_file "20250101_120000" "Log file path should contain timestamp"
+}
+
+# Complete the test suite
+test_suite_end

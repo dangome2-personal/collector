@@ -1,0 +1,271 @@
+#!/usr/bin/expect
+
+# Test Framework for Expect Scripts
+# Provides assertion functions and test organization utilities
+
+# Global variables for test tracking
+set test_suite_name ""
+set test_count 0
+set test_passed 0
+set test_failed 0
+set test_output ""
+set current_test_name ""
+
+# ANSI color codes for output
+set COLOR_RED "\033\[0;31m"
+set COLOR_GREEN "\033\[0;32m"
+set COLOR_YELLOW "\033\[0;33m"
+set COLOR_BLUE "\033\[0;34m"
+set COLOR_RESET "\033\[0m"
+
+# Start a test suite
+proc test_suite_start {name} {
+    global test_suite_name test_count test_passed test_failed
+    set test_suite_name $name
+    set test_count 0
+    set test_passed 0
+    set test_failed 0
+    
+    puts "\n${COLOR_BLUE}========================================${COLOR_RESET}"
+    puts "${COLOR_BLUE}Test Suite: $name${COLOR_RESET}"
+    puts "${COLOR_BLUE}========================================${COLOR_RESET}\n"
+}
+
+# End a test suite and print summary
+proc test_suite_end {} {
+    global test_suite_name test_count test_passed test_failed COLOR_RED COLOR_GREEN COLOR_YELLOW COLOR_RESET
+    
+    puts "\n${COLOR_BLUE}========================================${COLOR_RESET}"
+    puts "${COLOR_BLUE}Test Suite: $test_suite_name - Summary${COLOR_RESET}"
+    puts "${COLOR_BLUE}========================================${COLOR_RESET}"
+    puts "Total Tests: $test_count"
+    puts "${COLOR_GREEN}Passed: $test_passed${COLOR_RESET}"
+    
+    if {$test_failed > 0} {
+        puts "${COLOR_RED}Failed: $test_failed${COLOR_RESET}"
+        exit 1
+    } else {
+        puts "${COLOR_GREEN}All tests passed!${COLOR_RESET}"
+        exit 0
+    }
+}
+
+# Define a test case
+proc test_case {name body} {
+    global test_count test_passed test_failed current_test_name COLOR_GREEN COLOR_RED COLOR_RESET
+    
+    incr test_count
+    set current_test_name $name
+    
+    puts -nonewline "  Test $test_count: $name ... "
+    flush stdout
+    
+    # Run setup if defined
+    if {[info procs setup] != ""} {
+        setup
+    }
+    
+    # Run the test
+    set error_occurred 0
+    if {[catch {uplevel 1 $body} error_msg]} {
+        puts "${COLOR_RED}FAILED${COLOR_RESET}"
+        puts "    Error: $error_msg"
+        incr test_failed
+        set error_occurred 1
+    } else {
+        puts "${COLOR_GREEN}PASSED${COLOR_RESET}"
+        incr test_passed
+    }
+    
+    # Run teardown if defined
+    if {[info procs teardown] != ""} {
+        teardown
+    }
+    
+    return [expr {!$error_occurred}]
+}
+
+# ========================================
+# Assertion Functions
+# ========================================
+
+proc assert_true {condition {message ""}} {
+    if {!$condition} {
+        if {$message == ""} {
+            error "Assertion failed: expected true, got false"
+        } else {
+            error "Assertion failed: $message"
+        }
+    }
+}
+
+proc assert_false {condition {message ""}} {
+    if {$condition} {
+        if {$message == ""} {
+            error "Assertion failed: expected false, got true"
+        } else {
+            error "Assertion failed: $message"
+        }
+    }
+}
+
+proc assert_equal {actual expected {message ""}} {
+    if {$actual != $expected} {
+        if {$message == ""} {
+            error "Assertion failed: expected '$expected', got '$actual'"
+        } else {
+            error "Assertion failed: $message\n  Expected: $expected\n  Got: $actual"
+        }
+    }
+}
+
+proc assert_not_equal {actual expected {message ""}} {
+    if {$actual == $expected} {
+        if {$message == ""} {
+            error "Assertion failed: expected values to be different, both are '$actual'"
+        } else {
+            error "Assertion failed: $message"
+        }
+    }
+}
+
+proc assert_match {string pattern {message ""}} {
+    if {![string match $pattern $string]} {
+        if {$message == ""} {
+            error "Assertion failed: '$string' does not match pattern '$pattern'"
+        } else {
+            error "Assertion failed: $message\n  String: $string\n  Pattern: $pattern"
+        }
+    }
+}
+
+proc assert_contains {haystack needle {message ""}} {
+    if {[string first $needle $haystack] == -1} {
+        if {$message == ""} {
+            error "Assertion failed: '$haystack' does not contain '$needle'"
+        } else {
+            error "Assertion failed: $message"
+        }
+    }
+}
+
+proc assert_not_empty {value {message ""}} {
+    if {$value == ""} {
+        if {$message == ""} {
+            error "Assertion failed: value is empty"
+        } else {
+            error "Assertion failed: $message"
+        }
+    }
+}
+
+proc assert_file_exists {filepath {message ""}} {
+    if {![file exists $filepath]} {
+        if {$message == ""} {
+            error "Assertion failed: file '$filepath' does not exist"
+        } else {
+            error "Assertion failed: $message"
+        }
+    }
+}
+
+proc assert_file_not_exists {filepath {message ""}} {
+    if {[file exists $filepath]} {
+        if {$message == ""} {
+            error "Assertion failed: file '$filepath' exists but should not"
+        } else {
+            error "Assertion failed: $message"
+        }
+    }
+}
+
+proc assert_file_contains {filepath text {message ""}} {
+    if {![file exists $filepath]} {
+        error "Assertion failed: file '$filepath' does not exist"
+    }
+    
+    set fp [open $filepath r]
+    set contents [read $fp]
+    close $fp
+    
+    if {[string first $text $contents] == -1} {
+        if {$message == ""} {
+            error "Assertion failed: file '$filepath' does not contain '$text'"
+        } else {
+            error "Assertion failed: $message"
+        }
+    }
+}
+
+proc assert_output_contains {text {message ""}} {
+    global expect_out
+    
+    if {![info exists expect_out(buffer)]} {
+        error "Assertion failed: no expect output buffer available"
+    }
+    
+    if {[string first $text $expect_out(buffer)] == -1} {
+        if {$message == ""} {
+            error "Assertion failed: output does not contain '$text'"
+        } else {
+            error "Assertion failed: $message"
+        }
+    }
+}
+
+# ========================================
+# Helper Functions
+# ========================================
+
+proc create_temp_file {content} {
+    set filename "/tmp/expect_test_[clock seconds]_[pid].tmp"
+    set fp [open $filename w]
+    puts $fp $content
+    close $fp
+    return $filename
+}
+
+proc cleanup_temp_file {filename} {
+    if {[file exists $filename]} {
+        file delete $filename
+    }
+}
+
+proc create_temp_dir {} {
+    set dirname "/tmp/expect_test_[clock seconds]_[pid]"
+    file mkdir $dirname
+    return $dirname
+}
+
+proc cleanup_temp_dir {dirname} {
+    if {[file exists $dirname]} {
+        file delete -force $dirname
+    }
+}
+
+# Mock function to capture calls
+proc mock_function {name body} {
+    global mock_calls
+    set mock_calls($name) {}
+    
+    proc $name {args} [subst {
+        global mock_calls
+        lappend mock_calls($name) \$args
+        $body
+    }]
+}
+
+proc get_mock_calls {function_name} {
+    global mock_calls
+    if {[info exists mock_calls($function_name)]} {
+        return $mock_calls($function_name)
+    }
+    return {}
+}
+
+proc reset_mocks {} {
+    global mock_calls
+    array unset mock_calls
+}
+
+puts "Test framework loaded successfully"

@@ -1,0 +1,12 @@
+# Mock device responses for SONiC devices
+SONiC Software Version: SONiC.HEAD.0-dirty-20250101.120000
+Distribution: Debian 11.9
+Kernel: 5.10.0-21-2-amd64
+Build commit: 12345abcdef
+Build date: Mon Aug  1 12:00:00 UTC 2025
+Built by: sonicbld@sonic-build-server
+
+Platform: x86_64-cisco-8000-r0
+HwSKU: Cisco-8101-32FH
+ASIC: broadcom
+ASIC Count: 1

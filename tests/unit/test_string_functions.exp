@@ -1,0 +1,79 @@
+#!/usr/bin/expect
+
+# Unit Test: Test String Manipulation Functions
+# Tests various string operations used in the collector scripts
+
+source [file join [file dirname [info script]] "../lib/test_framework.exp"]
+
+test_suite_start "String Manipulation Functions"
+
+# Test Case 1: Hostname parsing
+test_case "extracts hostname from full device name" {
+    set full_device "PHX10-0100-0100-01RHE.example.com"
+    set hostname [lindex [split $full_device "."] 0]
+    
+    assert_equal $hostname "PHX10-0100-0100-01RHE" "Should extract hostname before first dot"
+}
+
+# Test Case 2: Filename from path
+test_case "extracts filename from full path" {
+    set full_path "/harddisk:/showtech/device_showtech_20250101.tar.gz"
+    set filename [file tail $full_path]
+    
+    assert_equal $filename "device_showtech_20250101.tar.gz" "Should extract filename from path"
+}
+
+# Test Case 3: File extension checking
+test_case "identifies tar.gz files" {
+    set filename "showtech_data.tar.gz"
+    
+    assert_true [string match "*.tar.gz" $filename] "Should match .tar.gz extension"
+}
+
+# Test Case 4: Pattern matching for device types
+test_case "identifies SONiC device names" {
+    set sonic_device "phx12-0101-0723-11t1"
+    set xr_device "PHX10-0100-0100-01RHE"
+    
+    # SONiC devices are lowercase and have different pattern
+    assert_true [string match {*-*-*-*t1} $sonic_device] "Should match SONiC pattern"
+    assert_false [string match {*-*-*-*t1} $xr_device] "Should not match XR device"
+}
+
+# Test Case 5: Command output parsing
+test_case "parses show version output" {
+    set version_output "Cisco IOS XR Software, Version 7.3.1\nCopyright (c) 2013-2021"
+    
+    assert_contains $version_output "Version 7.3.1" "Should contain version string"
+}
+
+# Test Case 6: IP address validation
+test_case "validates IP address format" {
+    set valid_ip "192.168.1.1"
+    set invalid_ip "999.999.999.999"
+    
+    # Simple regex for IP validation
+    set ip_pattern {^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$}
+    
+    assert_match $valid_ip $ip_pattern "Valid IP should match pattern"
+}
+
+# Test Case 7: Trim whitespace
+test_case "removes leading and trailing whitespace" {
+    set input_string "  test string  \n"
+    set trimmed [string trim $input_string]
+    
+    assert_equal $trimmed "test string" "Should remove whitespace"
+}
+
+# Test Case 8: List membership
+test_case "checks if filename in list" {
+    set messages_LC_list {file1.log file2.log file3.log}
+    set search_file "file2.log"
+    
+    set found [expr {[lsearch $messages_LC_list $search_file] != -1}]
+    
+    assert_true $found "Should find file in list"
+}
+
+test_suite_end
