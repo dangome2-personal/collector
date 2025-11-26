@@ -234,13 +234,19 @@ proc execute_sonic_long_command {cmd prompt} {
     
     send "$cmd\r"
     
+    # First, consume the command echo (same as execute_command)
+    expect -re [string map {* \\* . \\. ? \\? + \\+ ( \\( ) \\) \[ \\\[ \] \\\] $ \\$ ^ \\^ | \\|} $cmd]
+    
     # Wait for the tar.gz file to appear in output, then the prompt
     set output ""
     set found_file 0
     expect {
-        -re {/var/dump/sonic_dump_sonic_[0-9]+_[0-9]+\.tar\.gz} {
+        -re {/var/dump/sonic_dump.*\.tar\.gz|sonic_dump.*\.tar\.gz} {
+            # Match any sonic_dump tar.gz file, with or without full path
             append output $expect_out(buffer)
+            append output $expect_out(0,string)
             set found_file 1
+            puts "\n================== DEBUG: Found tar.gz file in output ==================\n"
             exp_continue
         }
         -re "$prompt" {
@@ -251,7 +257,9 @@ proc execute_sonic_long_command {cmd prompt} {
                 set timeout $old_timeout
                 return $output
             } else {
-                # Prompt without tar.gz file - keep waiting
+                # Prompt without tar.gz file - show debug and keep waiting
+                puts "\n================== DEBUG: Prompt matched but no tar.gz file found yet ==================\n"
+                puts "Output so far: [string range $output end-200 end]"
                 exp_continue
             }
         }
@@ -832,33 +840,36 @@ if {$mode == "--interactive"} {
         } else {
             puts "======== No new log files were generated during the interactive run. ========"
         }
-    }
 
-    # Clean up temporary files
-    if {[file exists $temp_playbook]} {
+    # Clean up temporary files (only in interactive mode)
+    if {[info exists temp_playbook] && [file exists $temp_playbook]} {
         file delete $temp_playbook
         puts "======== Removed temporary playbook: $temp_playbook ========"
     }
     # Clean up playbook copies from platform directories
-    foreach dir {"fretta" "spitfire" "sonic"} {
-        set dir_playbook "$dir/[file tail $temp_playbook]"
-        if {[file exists $dir_playbook]} {
-            file delete $dir_playbook
-            puts "======== Removed playbook copy: $dir_playbook ========"
+    if {[info exists temp_playbook]} {
+        foreach dir {"fretta" "spitfire" "sonic"} {
+            set dir_playbook "$dir/[file tail $temp_playbook]"
+            if {[file exists $dir_playbook]} {
+                file delete $dir_playbook
+                puts "======== Removed playbook copy: $dir_playbook ========"
+            }
         }
     }
-    if {$input_hostname ne $hostfile && [file exists $hostfile]} {
+    if {[info exists input_hostname] && [info exists hostfile] && $input_hostname ne $hostfile && [file exists $hostfile]} {
         file delete $hostfile
         puts "======== Removed temporary hostfile: $hostfile ========"
     }
 
     # Get the end time
-    set end_time [clock seconds]
-    # Calculate the duration in minutes and seconds
-    set duration [expr {$end_time - $start_time}]
-    set minutes [expr {$duration / 60}]
-    set seconds [expr {$duration % 60}]
-    puts "\n================== Interactive session completed in $minutes minutes and $seconds seconds. ==================\n"
+    if {[info exists start_time]} {
+        set end_time [clock seconds]
+        # Calculate the duration in minutes and seconds
+        set duration [expr {$end_time - $start_time}]
+        set minutes [expr {$duration / 60}]
+        set seconds [expr {$duration % 60}]
+        puts "\n================== Interactive session completed in $minutes minutes and $seconds seconds. ==================\n"
+    }
     exit 0
 
 
@@ -1314,15 +1325,20 @@ if {$mode == "--interactive"} {
             }
         }
     
-        # Identify platform type - try IOS XR detection first, then SONiC
+        # Identify platform type - try show version first for all platforms
         log_user 0
-        set version_output [execute_command "show version | include ws" ":.*\\$ |.*#"]
+        set version_output [execute_command "show version" "\r\n.*:.*\\$ |\r\n.*#"]
         
-        # If IOS XR command returns empty or fails, try full show version for SONiC
-        if {[string trim $version_output] eq "" || [regexp {Invalid|Unknown} $version_output]} {
-            set version_output [execute_command "show version" ":.*\\$ |.*#"]
+        # If show version fails or returns empty, try IOS XR specific command
+        if {[string trim $version_output] eq "" || [regexp {Invalid|Unknown|command not found} $version_output]} {
+            set version_output [execute_command "show version | include ws" "\r\n.*:.*\\$ |\r\n.*#"]
         }
         log_user 1
+        
+        # Debug: Show what we captured
+        puts "\n================== DEBUG: Version output captured: ==================\n"
+        puts $version_output
+        puts "\n================== END DEBUG ==================\n"
     
         # Determine the correct playbook directory based on platform
         set platform "unknown"
@@ -1333,11 +1349,13 @@ if {$mode == "--interactive"} {
         } elseif {[regexp {8000} $version_output]} {
             set platform "8000"
             set showtech_playbook_directory "spitfire"
-        } elseif {[regexp {SONiC} $version_output]} {
+        } elseif {[regexp -nocase {sonic} $version_output]} {
+            # Match sonic case-insensitively to catch SONiC, sonic, SONIC, etc.
             set platform "sonic"
             set showtech_playbook_directory "sonic"
         } else {
             puts "Unknown platform. Exiting..."
+            puts "DEBUG: Could not match platform in version output"
             exit 1
         }
     
@@ -1373,7 +1391,7 @@ if {$mode == "--interactive"} {
                     set showtech_output [execute_command $cmd_line "sysadmin-vm:.*#"]
                 } elseif {$platform eq "sonic"} {
                     # Use long-running command handler for SONiC show techsupport
-                    set showtech_output [execute_sonic_long_command $cmd_line ":.*\\$ |.*#"]
+                    set showtech_output [execute_sonic_long_command $cmd_line "\r\n.*:.*\\$ |\r\n.*#"]
                 } else {
                     set showtech_output [execute_command $cmd_line "RP/.*#"]
                 }
