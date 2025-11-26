@@ -1,6 +1,6 @@
 #!/usr/bin/expect
 
-# Script Version: 1.0.19
+# Script Version: 1.0.21
 # Last Updated: Nov 26th, 2025
 #
 # Features:
@@ -15,6 +15,13 @@
 # - Support for sudo commands with automatic password handling in interactive mode
 # - Interactive mode exit options: Ctrl+C, "END", or "exit" commands
 # Fixes:
+# - Fixed --playbook-scan credential handling: now uses env variable for username and secret file for password (not command-line args).
+# - Refactored --playbook-scan to use initialize_logging function for consistency with other modes.
+# - Fixed tar compression error handling: check if tarball exists rather than relying on stderr output (ignores harmless locale warnings).
+# - Fixed determine_playbook_file function for SONiC compatibility:
+#   * Changed prompt pattern from `:.*\$ |.*#` to `\r\n.*:.*\$ |\r\n.*#` to prevent premature matching
+#   * Made `terminal length 0` conditional - only runs on IOS XR platforms (not SONiC bash)
+#   * Added case-insensitive matching for SONiC platform detection with -nocase flag
 # - Fixed SCP command handling for messages-LC files.
 # - Added support for processing captured packets command.
 # - CURL upload function now retries up to 3 times with a delay between attempts.
@@ -138,8 +145,8 @@ proc pull_out_file_from_device {banner messages_LC_list sr_number cxd_token host
 
 # This function transfers the log file to the Cisco File Server - cxd.cisco.com using curl.
 proc transfer_log_file {log_file sr_number cxd_token} {
-    # set remote_host "cxd.cisco.com"
-    set remote_host "10.88.242.130"
+    set remote_host "cxd.cisco.com"
+    #set remote_host "10.88.242.130"
     set max_retries 3    ;# Maximum number of retry attempts
     set retry_delay 10   ;# Delay in seconds between retries
     set transfer_successful 0 ;# Flag to indicate overall success
@@ -428,27 +435,30 @@ proc list_playbooks {} {
 # Function to Identify platform type by retrieving version information.
 proc determine_playbook_file {playbook_name} {
     # Identify platform type by retrieving version information.
-    # Note: Adjust the prompt as needed.
-    set version_output [execute_command "show version" ":.*\\$ |.*#"]
-    execute_command "terminal length 0" ":.*\\$ |.*#"
-    log_user 1
-
+    set version_output [execute_command "show version" "\r\n.*:.*\\$ |\r\n.*#"]
+    
     # Determine the correct playbook directory based on platform.
     set platform "unknown"
     set playbook_directory ""
     if {[regexp {ncs5500} $version_output]} {
         set platform "ncs5500"
         set playbook_directory "fretta"
+        # Only run terminal length 0 on IOS XR platforms
+        execute_command "terminal length 0" "\r\n.*:.*\\$ |\r\n.*#"
     } elseif {[regexp {8000} $version_output]} {
         set platform "8000"
         set playbook_directory "spitfire"
-    } elseif {[regexp {SONiC} $version_output]} {
+        # Only run terminal length 0 on IOS XR platforms
+        execute_command "terminal length 0" "\r\n.*:.*\\$ |\r\n.*#"
+    } elseif {[regexp -nocase {sonic} $version_output]} {
         set platform "sonic"
         set playbook_directory "sonic"
     } else {
         puts "Unknown platform. Exiting..."
         exit 1
     }
+    
+    log_user 1
 
     # Construct the full playbook path.
     set playbook_file [file join $playbook_directory $playbook_name]
@@ -805,9 +815,10 @@ if {$mode == "--interactive"} {
                 set tarball "interactive-session-[clock format [clock seconds] -format {%d-%b-%Y-%H%M%S}].tar.gz"
             }
             puts "======== Compressing [llength $diff_files] log file(s) into $tarball ========"
-            if {[catch {exec tar -czf $tarball {*}$diff_files} tar_error]} {
-                puts "======== Error compressing logs: $tar_error ========"
-            } else {
+            catch {exec tar -czf $tarball {*}$diff_files} tar_error
+            
+            # Check if tarball was actually created (ignore locale warnings in stderr)
+            if {[file exists $tarball]} {
                 puts "======== Successfully compressed logs into $tarball ========"
                 
                 # Transfer the tarball to the remote host
@@ -835,6 +846,11 @@ if {$mode == "--interactive"} {
                             puts "======== Local file $f Removed After Unsuccessful Transfer. ========"
                         }
                     }
+                }
+            } else {
+                puts "======== Error compressing logs: tar command failed ========"
+                if {[info exists tar_error] && $tar_error ne ""} {
+                    puts "======== Tar error: $tar_error ========"
                 }
             }
         } else {
@@ -980,9 +996,9 @@ if {$mode == "--interactive"} {
         display_help
     }
 
-    # Extract arguments for playbook mode (for interactive mode, these are username and password)
+    # Extract arguments for playbook mode
     set args [extract_arguments 0 $argv]
-    lassign $args playbook_name hostnames username_arg password_arg
+    lassign $args playbook_name hostnames sr_number cxd_token
 
     foreach hostname $hostnames {
         # Initialize file_path variable
@@ -1003,15 +1019,10 @@ if {$mode == "--interactive"} {
             continue
         }
 
-        # Use credentials from command-line arguments
-        set username $username_arg
-        set password $password_arg
-        
-        # Setup logging without reading secret file
-        set timestamp [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
-        set log_file "logs/${actual_hostname}_${timestamp}.log"
-        set timeout 1200
-        log_file $log_file
+        # This function initializes the logging process by setting up necessary variables,
+        # generating a unique log file name, checking the password file, setting a timeout,
+        # and starting the logging process.
+        initialize_logging $actual_hostname
         
         puts "================== Log start time: [clock format [clock seconds] -format {%Y-%m-%d %H:%M:%S}]==================\n"
 
@@ -1025,9 +1036,11 @@ if {$mode == "--interactive"} {
         log_user 0
         # SSH into the device with automatic host key acceptance
         if {$ssh_port ne ""} {
-            spawn ssh -o StrictHostKeyChecking=no -p $ssh_port $username@$actual_hostname
+            spawn ssh -o StrictHostKeyChecking=no -p $ssh_port cisco@$actual_hostname
+            # spawn ssh -o StrictHostKeyChecking=no -p $ssh_port $username@$actual_hostname
         } else {
-            spawn ssh -o StrictHostKeyChecking=no $username@$actual_hostname
+            spawn ssh -o StrictHostKeyChecking=no cisco@$actual_hostname
+            # spawn ssh -o StrictHostKeyChecking=no $username@$actual_hostname
         }
         log_user 1
     
