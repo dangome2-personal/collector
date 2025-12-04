@@ -506,6 +506,256 @@ proc process_captured_packets {cmd_line file_path} {
         }
     }
 }
+
+# Function to parse show platform output and extract LC list and Active RP
+proc parse_platform_output {platform_output} {
+    set lc_list {}
+    set active_rp ""
+    
+    # Split output into lines
+    set lines [split $platform_output "\n"]
+    
+    foreach line $lines {
+        # Extract Active RP (looking for "Active" in Type column)
+        if {[regexp {(0/RP[0-9]/CPU0)\s+.*\(Active\)} $line match rp_location]} {
+            set active_rp $rp_location
+        }
+        
+        # Extract Line Cards - match patterns for both platforms:
+        # Cisco 8000: 0/X/CPU0 with "-LC" in type (e.g., "8800-LC-48H")
+        # NCS5500: 0/X/CPU0 with "NC55-MOD" or "NC55-" followed by numbers in type
+        # Exclude RPs, FCs, FTs, PMs, SCs (fabric cards, fans, power, system controllers)
+        if {[regexp {^(0/[0-9]+/CPU0)\s+} $line match lc_location]} {
+            # Check if this is a line card (has -LC or NC55-MOD or NC55-[0-9])
+            # Exclude RP, FC, FT, PM, SC nodes
+            if {[regexp -- {-LC|NC55-MOD|NC55-[0-9]} $line] && ![regexp {0/RP|0/FC|0/FT|0/PM|0/SC} $line]} {
+                lappend lc_list $lc_location
+            }
+        }
+    }
+    
+    return [list $lc_list $active_rp]
+}
+
+# Function to determine Active RP IP address based on platform
+proc get_active_rp_ip {active_rp platform_output} {
+    # Detect platform type from show platform output
+    # NCS-5500 uses 172.0.16.x, Cisco 8000 uses 172.0.30.x
+    set is_ncs5500 [regexp -nocase {NCS-5[0-9]{3}|NC55} $platform_output]
+    
+    if {$active_rp eq "0/RP0/CPU0"} {
+        if {$is_ncs5500} {
+            return "172.0.16.1"
+        } else {
+            return "172.0.30.1"
+        }
+    } elseif {$active_rp eq "0/RP1/CPU0"} {
+        if {$is_ncs5500} {
+            return "172.0.17.1"
+        } else {
+            return "172.0.31.1"
+        }
+    } else {
+        return ""
+    }
+}
+
+# Function to collect PPDB files from all LCs
+proc process_ppdb_collection {cmd_line prompt} {
+    puts "\n================== Detected pd_aib_show_prod command ==================\n"
+    
+    # Step 1: Get platform information
+    puts "Step 1: Gathering platform information..."
+    set platform_output [execute_command "show platform" $prompt]
+    set parsed_data [parse_platform_output $platform_output]
+    set lc_list [lindex $parsed_data 0]
+    set active_rp [lindex $parsed_data 1]
+    
+    if {$active_rp eq ""} {
+        puts "ERROR: Could not determine Active RP"
+        return ""
+    }
+    
+    set active_rp_ip [get_active_rp_ip $active_rp $platform_output]
+    if {$active_rp_ip eq ""} {
+        puts "ERROR: Could not map Active RP to IP address"
+        return ""
+    }
+    
+    puts "Active RP: $active_rp (IP: $active_rp_ip)"
+    puts "Line Cards found: [llength $lc_list] - $lc_list"
+    
+    if {[llength $lc_list] == 0} {
+        puts "WARNING: No Line Cards found in platform output"
+        return ""
+    }
+    
+    # Step 2: Loop through each LC
+    set ppdb_files {}
+    foreach lc $lc_list {
+        # Extract LC number (e.g., "1" from "0/1/CPU0")
+        regexp {0/([0-9]+)/CPU0} $lc match lc_num
+        set ppdb_filename "ppdb_prod_dump_file_lc${lc_num}.txt"
+        
+        puts "\n--- Processing LC: $lc ---"
+        
+        # Attach to LC
+        execute_command "attach location $lc" ".*#"
+        
+        # Set bash prompt
+        execute_command "export PS1='#'" "#"
+        
+        # Run pd_aib_show_prod command
+        puts "Running pd_aib_show_prod -P0 on $lc..."
+        set pd_output [execute_command "pd_aib_show_prod -P0" "#"]
+        
+        # Extract the default filename from output
+        set default_file "/tmp/ppdb_prod_dump_file.txt"
+        if {[regexp {File written: (/tmp/ppdb_prod_dump_file\.txt)} $pd_output]} {
+            puts "File generated: $default_file"
+            
+            # Rename the file
+            execute_command "mv $default_file /tmp/$ppdb_filename" "#"
+            
+            # Verify file exists
+            execute_command "ls -lh /tmp/$ppdb_filename" "#"
+            
+            # SCP to Active RP (no username needed, direct IP to IP on same device)
+            puts "Transferring $ppdb_filename to Active RP ($active_rp_ip)..."
+            send "scp /tmp/$ppdb_filename ${active_rp_ip}:/harddisk:/\r"
+            expect {
+                -re "100%" {
+                    # SCP progress indicator - wait for prompt
+                    expect -re "#"
+                    puts "Successfully transferred $ppdb_filename to Active RP"
+                    lappend ppdb_files $ppdb_filename
+                }
+                "No route to host" {
+                    puts "ERROR: Cannot reach Active RP at $active_rp_ip"
+                }
+                "Connection refused" {
+                    puts "ERROR: Connection refused by Active RP"
+                }
+                -re "#" {
+                    puts "Transfer completed for $ppdb_filename"
+                    lappend ppdb_files $ppdb_filename
+                }
+                timeout {
+                    puts "WARNING: SCP timeout for $ppdb_filename"
+                }
+            }
+        } else {
+            puts "WARNING: pd_aib_show_prod did not generate expected file for $lc"
+        }
+        
+        # Exit from LC bash back to XR
+        execute_command "exit" $prompt
+    }
+    
+    # Step 3: Compress all files on Active RP
+    if {[llength $ppdb_files] > 0} {
+        puts "\n================== Compressing PPDB files on Active RP ==================\n"
+        
+        # Generate timestamp for tarball
+        set timestamp [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
+        set tarball_name "ppdb_prod_dump_all_lcs_${timestamp}.tar.gz"
+        
+        puts "Attaching to Active RP: $active_rp"
+        
+        # Attach to Active RP and set bash prompt
+        send "attach location $active_rp\r"
+        expect {
+            -re ".*#" {
+                puts "Successfully attached to $active_rp"
+            }
+            timeout {
+                puts "Timeout attaching to $active_rp"
+                return ""
+            }
+        }
+        
+        # Set bash prompt with more reliable pattern
+        send "export PS1='#'\r"
+        expect {
+            -re "#" {
+                puts "Bash prompt set"
+            }
+            timeout {
+                puts "Timeout setting bash prompt"
+            }
+        }
+        
+        # Change to harddisk directory
+        puts "Changing to /harddisk: directory..."
+        send "cd /harddisk:\r"
+        expect -re "#"
+        
+        # Get the actual path (in bash, /harddisk: maps to /misc/disk1/)
+        send "pwd\r"
+        set actual_path ""
+        expect {
+            -re "(/\[^\\r\\n\]+)\\r\\n.*#" {
+                set actual_path $expect_out(1,string)
+                puts "Actual working directory in bash: $actual_path"
+            }
+            -re "#" {
+                set actual_path "/misc/disk1"
+                puts "Using default path: $actual_path"
+            }
+        }
+        
+        # Create tarball with timestamp
+        set file_list [join $ppdb_files " "]
+        puts "Creating tarball: $tarball_name with files: $file_list"
+        
+        # Verify files exist before creating tarball
+        puts "Verifying files exist in $actual_path..."
+        send "ls -lh ppdb_prod_dump_file_lc*.txt\r"
+        expect -re "#"
+        
+        # Increase timeout for tar operation
+        global timeout
+        set old_timeout $timeout
+        set timeout 60  ;# 60 seconds should be enough for small PPDB files
+        
+        send "tar -czvf $tarball_name $file_list\r"
+        
+        # Wait for tar to complete (files are small, should be quick)
+        expect {
+            -re "#" {
+                puts "Tarball created successfully"
+            }
+            timeout {
+                puts "Timeout creating tarball"
+                set timeout $old_timeout
+                return ""
+            }
+        }
+        
+        # Restore timeout
+        set timeout $old_timeout
+        
+        # Verify tarball
+        puts "Verifying tarball..."
+        send "ls -lh $tarball_name\r"
+        expect -re "#"
+        
+        # Exit back to XR
+        puts "Exiting back to XR mode..."
+        send "exit\r"
+        expect -re $prompt
+        
+        # Build the full path for SCP (use /harddisk:/ like other SCP operations)
+        set scp_path "/harddisk:/$tarball_name"
+        puts "\n================== PPDB collection complete: $scp_path ==================\n"
+        
+        # Return the tarball path for later SCP to jumpserver
+        return $scp_path
+    }
+    
+    return ""
+}
+
 # Function to enter sysadmin mode
 proc enter_admin_mode {} {
     global in_admin_mode
@@ -1179,11 +1429,11 @@ if {$mode == "--interactive"} {
         log_user 0
         # SSH into the device with automatic host key acceptance
         if {$ssh_port ne ""} {
-            spawn ssh -o StrictHostKeyChecking=no -p $ssh_port cisco@$actual_hostname
-            # spawn ssh -o StrictHostKeyChecking=no -p $ssh_port $username@$actual_hostname
+            # spawn ssh -o StrictHostKeyChecking=no -p $ssh_port cisco@$actual_hostname
+            spawn ssh -o StrictHostKeyChecking=no -p $ssh_port $username@$actual_hostname
         } else {
-            spawn ssh -o StrictHostKeyChecking=no cisco@$actual_hostname
-            # spawn ssh -o StrictHostKeyChecking=no $username@$actual_hostname
+            # spawn ssh -o StrictHostKeyChecking=no cisco@$actual_hostname
+            spawn ssh -o StrictHostKeyChecking=no $username@$actual_hostname
         }
         log_user 1
     
@@ -1256,6 +1506,23 @@ if {$mode == "--interactive"} {
                     puts "Failed to parse clock output: $clock_output"
                     continue
                 }
+            }
+
+            # Check if the command is pd_aib_show_prod for PPDB collection
+            if {[regexp {^pd_aib_show_prod} $cmd_line]} {
+                # Process PPDB collection from all LCs
+                set ppdb_tarball [process_ppdb_collection $cmd_line ":.*\\$ |.*#"]
+                
+                # If tarball was created, add to file transfer list
+                if {$ppdb_tarball ne ""} {
+                    set file_path $ppdb_tarball
+                    puts "PPDB tarball ready for transfer: $ppdb_tarball"
+                    
+                    # Ensure we're synced with the XR prompt after returning from PPDB collection
+                    send "\r"
+                    expect -re ":.*\\$ |.*#"
+                }
+                continue
             }
 
             # Check if the command is an SCP for messages (e.g. looking for "/var/log/messages" substring)
@@ -1341,7 +1608,12 @@ if {$mode == "--interactive"} {
         # Generate a unique log file name based on the current timestamp
         set timestamp [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
         # Construct the destination file name with the timestamp
-        set destination_file "${actual_hostname}-${timestamp}.capture-packets-traps"
+        # Check if this is a PPDB tarball or captured packets file
+        if {$file_path != "" && [regexp {ppdb_prod_dump_all_lcs} $file_path]} {
+            set destination_file "${actual_hostname}-${timestamp}-ppdb.tar.gz"
+        } else {
+            set destination_file "${actual_hostname}-${timestamp}.capture-packets-traps"
+        }
         
         if {$messages_LC_list != ""} {
             set banner "Transferring messages-LC files from ${actual_hostname}${port_info} to SAW JumpServer:"
@@ -1377,33 +1649,93 @@ if {$mode == "--interactive"} {
         if {$file_path != ""} {
             #puts "File path to be used for SCP: $file_path"
             # You can now use this variable in the SCP operation later in the script
-            puts "\n================== Transferring Captured Packets file from ${actual_hostname}${port_info} to SAW JumpServer: $destination_file ================== \n"
+            puts "\n================== Transferring file from ${actual_hostname}${port_info} to SAW JumpServer: $destination_file ================== \n"
+            #puts "DEBUG: SCP command will be: scp $username@$actual_hostname:$file_path ./logs/$destination_file"
             if {$ssh_port ne ""} {
-                spawn scp -P $ssh_port dangome2@$actual_hostname:$file_path ./logs/$destination_file
+                #puts "DEBUG: Using SSH port: $ssh_port"
+                spawn scp -P $ssh_port $username@$actual_hostname:$file_path ./logs/$destination_file
             } else {
-                spawn scp dangome2@$actual_hostname:$file_path ./logs/$destination_file
+                #puts "DEBUG: Using default SSH port"
+                spawn scp $username@$actual_hostname:$file_path ./logs/$destination_file
             }
             #Uncomment for production
             #spawn scp -o StrictHostKeyChecking=no $username@$hostname:$file_path ./showtechs
+            
+            #puts "DEBUG: Waiting for SCP prompts..."
+            log_user 1
             expect {
                 "continue connecting (yes/no/\[fingerprint\])?" {
+                    #puts "DEBUG: Got fingerprint prompt, sending yes"
                     send "yes\r"
-                    expect "assword:" { send "$password\r" }
+                    exp_continue
                 }
                 "assword:" {
+                    #puts "DEBUG: Got password prompt, sending password"
                     send "$password\r"
+                    exp_continue
+                }
+                -re "No such file" {
+                    puts "ERROR: File not found on device: $file_path"
+                    catch {close}
+                    catch {wait}
                 }
                 timeout {
-                    puts "SCP from ${actual_hostname}${port_info} timed out"
-                    continue
+                    puts "ERROR: SCP from ${actual_hostname}${port_info} timed out"
+                    catch {close}
+                    catch {wait}
                 }
                 eof {
-                    set scp_status [wait]
-                    puts "\n================== SCP from ${actual_hostname}${port_info} terminated with status: $scp_status ==================\n"
+                    #puts "DEBUG: Got EOF, checking exit status"
+                    catch {wait} scp_status
+                    #puts "DEBUG: wait result: $scp_status"
+                    if {[llength $scp_status] >= 4} {
+                        set exit_code [lindex $scp_status 3]
+                        #puts "DEBUG: Exit code: $exit_code"
+                        
+                        # Check if file was actually transferred successfully
+                        if {[file exists "./logs/$destination_file"] && [file size "./logs/$destination_file"] > 0} {
+                            puts "\n================== SCP from ${actual_hostname}${port_info} completed successfully ==================\n"
+                            
+                            # Upload PPDB tarball to cxd.cisco.com if this is a PPDB file
+                            if {[regexp {ppdb} $destination_file]} {
+                                puts "Uploading PPDB tarball to cxd.cisco.com..."
+                                set transfer_success [transfer_log_file "./logs/$destination_file" $sr_number $cxd_token]
+                                if {$transfer_success} {
+                                    puts "PPDB tarball uploaded successfully to cxd.cisco.com"
+                                    # Delete local file after successful upload
+                                    if {[file exists "./logs/$destination_file"]} {
+                                        file delete "./logs/$destination_file"
+                                        puts "Local PPDB file ./logs/$destination_file removed after successful transfer."
+                                    }
+                                } else {
+                                    puts "Upload of PPDB tarball to cxd.cisco.com failed; local file retained."
+                                }
+                            }
+                        } elseif {$exit_code == 0} {
+                            puts "\n================== SCP from ${actual_hostname}${port_info} completed successfully ==================\n"
+                            
+                            # Upload PPDB tarball to cxd.cisco.com if this is a PPDB file
+                            if {[regexp {ppdb} $destination_file]} {
+                                puts "Uploading PPDB tarball to cxd.cisco.com..."
+                                set transfer_success [transfer_log_file "./logs/$destination_file" $sr_number $cxd_token]
+                                if {$transfer_success} {
+                                    puts "PPDB tarball uploaded successfully to cxd.cisco.com"
+                                    # Delete local file after successful upload
+                                    if {[file exists "./logs/$destination_file"]} {
+                                        file delete "./logs/$destination_file"
+                                        puts "Local PPDB file ./logs/$destination_file removed after successful transfer."
+                                    }
+                                } else {
+                                    puts "Upload of PPDB tarball to cxd.cisco.com failed; local file retained."
+                                }
+                            }
+                        } else {
+                            puts "\n================== SCP from ${actual_hostname}${port_info} failed with exit code: $exit_code ==================\n"
+                        }
+                    }
                 }
             }
-            expect eof
-            puts "\n================== SCP from ${actual_hostname}${port_info} completed successfully ==================\n"            
+            log_user 0            
         } else {
             #puts "No valid file path command found in the playbook"
             continue  ;# Skip the SCP operation
