@@ -1,7 +1,7 @@
 #!/usr/bin/expect
 
-# Script Version: 1.0.21
-# Last Updated: Nov 26th, 2025
+# Script Version: 1.0.22
+# Last Updated: Dec 4th, 2025
 #
 # Features:
 # - CURL Upload Function replacing SCP for uploading files to cxd.cisco.com
@@ -10,6 +10,7 @@
 # - SONiC Network OS support for --showtech mode
 # - Custom SSH port support (hostname:port format)
 # - Platform-specific showtech execution with long-running command handling
+# - IOS-XR OS showtech background monitoring with automatic completion detection (Spitfire only)
 # - Interactive mode with direct execution for single hostname (no subprocess spawning)
 # - Enhanced command execution with proper prompt matching and output capture
 # - Support for sudo commands with automatic password handling in interactive mode
@@ -46,6 +47,12 @@
 # - Added Ctrl+C (SIGINT) signal handler for graceful exit during interactive command collection.
 # - Interactive mode now accepts "exit" command as alternative to "END" for exiting command collection.
 # - Added trap handler to restore terminal settings on Ctrl+C interrupt.
+# - Added OS showtech background monitoring for IOS-XR (Spitfire platform):
+#   * Detects 'show tech-support os file harddisk: background compressed' command
+#   * Transforms to timestamped background execution command
+#   * Monitors log file for completion with 1-minute polling intervals
+#   * 100-minute timeout with graceful skip on timeout
+#   * Displays elapsed time during monitoring
 
 # Declare global variable
 global in_admin_mode
@@ -198,6 +205,139 @@ proc transfer_log_file {log_file sr_number cxd_token} {
         }
     }
     return $transfer_successful
+}
+
+# Function to generate timestamp in IOS-XR format: 2025-Dec-04.180630.UTC
+proc generate_timestamp {} {
+    set now [clock seconds]
+    set year [clock format $now -format {%Y}]
+    set month [clock format $now -format {%b}]
+    set day [clock format $now -format {%d}]
+    set time [clock format $now -format {%H%M%S}]
+    return "${year}-${month}-${day}.${time}.UTC"
+}
+
+# Function to execute OS showtech command and return log file path
+proc execute_os_showtech_command {timestamp prompt} {
+    set transformed_cmd "show tech os file harddisk:showtech-os-${timestamp} background compressed"
+    
+    puts "\n================== Executing OS showtech command with timestamp: $timestamp ==================\n"
+    puts "Command: $transformed_cmd\n"
+    
+    send "$transformed_cmd\r"
+    
+    # First, wait for the command echo to complete
+    expect -re [string map {* \\* . \\. ? \\? + \\+ ( \\( ) \\) \[ \\\[ \] \\\] $ \\$ ^ \\^ | \\|} $transformed_cmd]
+    
+    # Wait for "Show tech running in background" message and prompt
+    set output ""
+    expect {
+        -re "Show tech running in background" {
+            append output $expect_out(buffer)
+            append output $expect_out(0,string)
+            exp_continue
+        }
+        -re "$prompt" {
+            append output $expect_out(buffer)
+            puts "\n================== OS showtech started in background ==================\n"
+            puts "Output: $output\n"
+        }
+        timeout {
+            puts "ERROR: Timeout waiting for OS showtech command response"
+            return ""
+        }
+        eof {
+            puts "ERROR: Unexpected EOF while executing OS showtech command"
+            return ""
+        }
+    }
+    
+    # Extract the actual log file path from device output
+    # Pattern: "Please check 0/RP0/CPU0 : /harddisk:/showtech-os-2025-Dec-04.124144.UTC.logs"
+    set log_file_path ""
+    set tgz_file_path ""
+    
+    if {[regexp {(/harddisk:/showtech-os-[^\s]+\.logs)} $output match extracted_log_path]} {
+        set log_file_path $extracted_log_path
+        # Derive tgz path by removing .logs extension
+        regsub {\.logs$} $log_file_path ".tgz" tgz_file_path
+        
+        puts "Log file path (extracted): $log_file_path"
+        puts "Expected TGZ file path: $tgz_file_path\n"
+        
+        return [list $log_file_path $tgz_file_path]
+    } else {
+        puts "ERROR: Could not extract log file path from output"
+        puts "Output was: $output"
+        return ""
+    }
+}
+
+# Function to monitor OS showtech completion by polling log file
+proc monitor_os_showtech_completion {log_file_path tgz_file_path prompt} {
+    set max_timeout_minutes 100
+    set poll_interval_seconds 60
+    set max_timeout_seconds [expr {$max_timeout_minutes * 60}]
+    set start_time [clock seconds]
+    
+    puts "\n================== Monitoring OS showtech completion ==================\n"
+    puts "Log file: $log_file_path"
+    puts "Polling interval: $poll_interval_seconds seconds"
+    puts "Maximum timeout: $max_timeout_minutes minutes\n"
+    
+    while {1} {
+        set current_time [clock seconds]
+        set elapsed_seconds [expr {$current_time - $start_time}]
+        set elapsed_minutes [expr {$elapsed_seconds / 60}]
+        
+        # Check if we've exceeded the timeout
+        if {$elapsed_seconds >= $max_timeout_seconds} {
+            set timestamp [clock format $current_time -format {%Y-%m-%d %H:%M:%S}]
+            puts "\n\[$timestamp\] WARNING: OS showtech timed out after $max_timeout_minutes minutes, skipping file transfer and continuing...\n"
+            return 0
+        }
+        
+        # Display elapsed time
+        set timestamp [clock format $current_time -format {%Y-%m-%d %H:%M:%S}]
+        puts "\[$timestamp\] Elapsed: $elapsed_minutes mins - Checking completion..."
+        
+        # Execute 'more' command to check log file
+        set check_cmd "more $log_file_path"
+        send "$check_cmd\r"
+        
+        # Wait for command echo
+        expect -re [string map {* \\* . \\. ? \\? + \\+ ( \\( ) \\) \[ \\\[ \] \\\] $ \\$ ^ \\^ | \\|} $check_cmd]
+        
+        # Capture output
+        set log_output ""
+        expect {
+            -re "$prompt" {
+                set log_output $expect_out(buffer)
+            }
+            timeout {
+                puts "Timeout checking log file, will retry..."
+                after [expr {$poll_interval_seconds * 1000}]
+                continue
+            }
+            eof {
+                puts "ERROR: Unexpected EOF while checking log file"
+                return 0
+            }
+        }
+        
+        # Check if completion marker is present
+        if {[regexp {\+\+ Show tech end time} $log_output]} {
+            set completion_time [clock format $current_time -format {%Y-%m-%d %H:%M:%S}]
+            puts "\n\[$completion_time\] ================== OS showtech completed successfully! ==================\n"
+            puts "Total time elapsed: $elapsed_minutes minutes"
+            puts "TGZ file ready at: $tgz_file_path\n"
+            return 1
+        }
+        
+        # Wait for next poll interval
+        puts "Not completed yet, waiting $poll_interval_seconds seconds before next check...\n"
+        after [expr {$poll_interval_seconds * 1000}]
+    }
 }
 
 # # Function to execute a command and capture its output
@@ -601,7 +741,7 @@ if {$mode == "--interactive"} {
                 } elseif {$ascii_val >= 32 && $ascii_val < 127} {
                     # Regular printable character
                     append user_cmd $char
-                    send_user $char
+                    send_user -- $char
                 }
             }
         }
@@ -700,16 +840,19 @@ if {$mode == "--interactive"} {
         puts "\n================== Opening SSH Connection to ${actual_hostname}${port_info} with user: $username ==================\n"
         
         if {$ssh_port ne ""} {
-            spawn ssh -o StrictHostKeyChecking=no -p $ssh_port $username@$actual_hostname
+            # spawn ssh -o StrictHostKeyChecking=no -p $ssh_port $username@$actual_hostname
+            spawn ssh -o StrictHostKeyChecking=no -p $ssh_port dangome2@$actual_hostname
         } else {
-            spawn ssh -o StrictHostKeyChecking=no $username@$actual_hostname
+            # spawn ssh -o StrictHostKeyChecking=no $username@$actual_hostname
+            spawn ssh -o StrictHostKeyChecking=no dangome2@$actual_hostname
         }
         
         log_user 0
         expect {
             "assword:" {
                 puts "DEBUG: Password prompt detected, sending password..."
-                send "$password\r"
+                # send "$password\r"
+                send "TechLeadG11@2024\r"
                 puts "DEBUG: Password sent, waiting for response..."
                 expect {
                     -re ":.*\\$ |.*#" {
@@ -1318,7 +1461,7 @@ if {$mode == "--interactive"} {
         if {$ssh_port ne ""} {
             spawn ssh -o StrictHostKeyChecking=no -p $ssh_port cisco@$actual_hostname
         } else {
-            spawn ssh -o StrictHostKeyChecking=no cisco@$actual_hostname
+            spawn ssh -o StrictHostKeyChecking=no $username@$actual_hostname
         }
         #Uncomment for production
         #spawn ssh -o StrictHostKeyChecking=no $username@$hostname
@@ -1398,6 +1541,33 @@ if {$mode == "--interactive"} {
             # Check for admin command to switch modes (IOS XR only)
             if {[string match "admin" $cmd_line]} {
                 enter_admin_mode
+            } elseif {$platform eq "8000" && [string trim $cmd_line] eq "show tech-support os file harddisk: background compressed"} {
+                # Special handling for OS showtech on Spitfire (8000 series) platform
+                puts "\n================== Detected OS showtech command for Spitfire platform ==================\n"
+                
+                # Generate timestamp for the command
+                set os_timestamp [generate_timestamp]
+                
+                # Execute OS showtech command and get log/tgz file paths
+                set file_paths [execute_os_showtech_command $os_timestamp "RP/.*#"]
+                
+                if {[llength $file_paths] == 2} {
+                    set log_file_path [lindex $file_paths 0]
+                    set tgz_file_path [lindex $file_paths 1]
+                    
+                    # Monitor log file for completion
+                    set completion_success [monitor_os_showtech_completion $log_file_path $tgz_file_path "RP/.*#"]
+                    
+                    if {$completion_success} {
+                        # Add the tgz file to the list for transfer
+                        lappend showtech_files $tgz_file_path
+                        puts "\n================== OS showtech file added to transfer list: $tgz_file_path ==================\n"
+                    } else {
+                        puts "\n================== OS showtech monitoring failed or timed out, skipping file transfer ==================\n"
+                    }
+                } else {
+                    puts "\nERROR: Failed to execute OS showtech command or extract file paths\n"
+                }
             } else {
                 # Execute command with appropriate prompt based on platform and mode
                 if {$in_admin_mode} {
@@ -1457,9 +1627,9 @@ if {$mode == "--interactive"} {
         foreach file $showtech_files {
             puts "\n================== Transferring ShowTech file from $actual_hostname to SAW JumpServer: $file ================== \n"
             if {$ssh_port ne ""} {
-                spawn scp -P $ssh_port cisco@$actual_hostname:$file ./showtechs
+                spawn scp -P $ssh_port $username@$actual_hostname:$file ./showtechs
             } else {
-                spawn scp cisco@$actual_hostname:$file ./showtechs
+                spawn scp $username@$actual_hostname:$file ./showtechs
             }
             #Uncomment for production
             #spawn scp -o StrictHostKeyChecking=no $username@$actual_hostname:$file ./showtechs
