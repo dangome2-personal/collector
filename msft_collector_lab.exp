@@ -561,7 +561,7 @@ proc get_active_rp_ip {active_rp platform_output} {
 }
 
 # Function to collect PPDB files from all LCs
-proc process_ppdb_collection {cmd_line prompt} {
+proc process_ppdb_collection {cmd_line prompt hostname} {
     puts "\n================== Detected pd_aib_show_prod command ==================\n"
     
     # Step 1: Get platform information
@@ -749,8 +749,8 @@ proc process_ppdb_collection {cmd_line prompt} {
         set scp_path "/harddisk:/$tarball_name"
         puts "\n================== PPDB collection complete: $scp_path ==================\n"
         
-        # Return the tarball path for later SCP to jumpserver
-        return $scp_path
+        # Return both the tarball path and the tarball name for later renaming
+        return [list $scp_path $tarball_name]
     }
     
     return ""
@@ -1511,12 +1511,13 @@ if {$mode == "--interactive"} {
             # Check if the command is pd_aib_show_prod for PPDB collection
             if {[regexp {^pd_aib_show_prod} $cmd_line]} {
                 # Process PPDB collection from all LCs
-                set ppdb_tarball [process_ppdb_collection $cmd_line ":.*\\$ |.*#"]
+                set ppdb_result [process_ppdb_collection $cmd_line ":.*\\$ |.*#" $actual_hostname]
                 
                 # If tarball was created, add to file transfer list
-                if {$ppdb_tarball ne ""} {
-                    set file_path $ppdb_tarball
-                    puts "PPDB tarball ready for transfer: $ppdb_tarball"
+                if {[llength $ppdb_result] == 2} {
+                    set file_path [lindex $ppdb_result 0]
+                    set ppdb_tarball_name [lindex $ppdb_result 1]
+                    puts "PPDB tarball ready for transfer: $file_path"
                     
                     # Ensure we're synced with the XR prompt after returning from PPDB collection
                     send "\r"
@@ -1610,7 +1611,12 @@ if {$mode == "--interactive"} {
         # Construct the destination file name with the timestamp
         # Check if this is a PPDB tarball or captured packets file
         if {$file_path != "" && [regexp {ppdb_prod_dump_all_lcs} $file_path]} {
-            set destination_file "${actual_hostname}-${timestamp}-ppdb.tar.gz"
+            # Extract timestamp from original tarball name and include hostname
+            if {[regexp {ppdb_prod_dump_all_lcs_(\d+_\d+)\.tar\.gz} $ppdb_tarball_name match orig_timestamp]} {
+                set destination_file "ppdb_prod_dump_all_lcs_${actual_hostname}_${orig_timestamp}.tar.gz"
+            } else {
+                set destination_file "ppdb_prod_dump_all_lcs_${actual_hostname}_${timestamp}.tar.gz"
+            }
         } else {
             set destination_file "${actual_hostname}-${timestamp}.capture-packets-traps"
         }
@@ -1696,38 +1702,16 @@ if {$mode == "--interactive"} {
                         if {[file exists "./logs/$destination_file"] && [file size "./logs/$destination_file"] > 0} {
                             puts "\n================== SCP from ${actual_hostname}${port_info} completed successfully ==================\n"
                             
-                            # Upload PPDB tarball to cxd.cisco.com if this is a PPDB file
+                            # Skip individual upload for PPDB files - they'll be bundled in --scan mode
                             if {[regexp {ppdb} $destination_file]} {
-                                puts "Uploading PPDB tarball to cxd.cisco.com..."
-                                set transfer_success [transfer_log_file "./logs/$destination_file" $sr_number $cxd_token]
-                                if {$transfer_success} {
-                                    puts "PPDB tarball uploaded successfully to cxd.cisco.com"
-                                    # Delete local file after successful upload
-                                    if {[file exists "./logs/$destination_file"]} {
-                                        file delete "./logs/$destination_file"
-                                        puts "Local PPDB file ./logs/$destination_file removed after successful transfer."
-                                    }
-                                } else {
-                                    puts "Upload of PPDB tarball to cxd.cisco.com failed; local file retained."
-                                }
+                                puts "PPDB tarball saved to logs/ directory (will be bundled in --scan mode)"
                             }
                         } elseif {$exit_code == 0} {
                             puts "\n================== SCP from ${actual_hostname}${port_info} completed successfully ==================\n"
                             
-                            # Upload PPDB tarball to cxd.cisco.com if this is a PPDB file
+                            # Skip individual upload for PPDB files - they'll be bundled in --scan mode
                             if {[regexp {ppdb} $destination_file]} {
-                                puts "Uploading PPDB tarball to cxd.cisco.com..."
-                                set transfer_success [transfer_log_file "./logs/$destination_file" $sr_number $cxd_token]
-                                if {$transfer_success} {
-                                    puts "PPDB tarball uploaded successfully to cxd.cisco.com"
-                                    # Delete local file after successful upload
-                                    if {[file exists "./logs/$destination_file"]} {
-                                        file delete "./logs/$destination_file"
-                                        puts "Local PPDB file ./logs/$destination_file removed after successful transfer."
-                                    }
-                                } else {
-                                    puts "Upload of PPDB tarball to cxd.cisco.com failed; local file retained."
-                                }
+                                puts "PPDB tarball saved to logs/ directory (will be bundled in --scan mode)"
                             }
                         } else {
                             puts "\n================== SCP from ${actual_hostname}${port_info} failed with exit code: $exit_code ==================\n"
@@ -2185,7 +2169,7 @@ if {$mode == "--interactive"} {
         set cxd_token [lindex $argv 3]
         set date [exec date -u]
         # Build the scan command that will call msft_collector --playbook for each hostname
-        set scan_cmd "cat $hostfile \| xargs -I {} -P 50 sh -c 'msft_collector --playbook-scan $playbook {} $sr_number $cxd_token'"
+        set scan_cmd "cat $hostfile \| xargs -I {} -P 50 sh -c './msft_collector_lab.exp --playbook-scan $playbook {} $sr_number $cxd_token'"
         puts "======== $date ========\n======== Executing scan command: $scan_cmd ========"
         
         # Build and execute the scan command via sh
@@ -2197,11 +2181,12 @@ if {$mode == "--interactive"} {
  
             # # Include both .log and .capture-packets-traps files in the `logs` directory
             # set new_files [glob -nocomplain logs/*.{log,capture-packets-traps,}]            
-            # Include .log, .capture-packets-traps, and messages-LC* files in the `logs` directory
+            # Include .log, .capture-packets-traps, messages-LC*, and PPDB files in the `logs` directory
             set new_files [concat \
                 [glob -nocomplain logs/*.log] \
                 [glob -nocomplain logs/*.capture-packets-traps] \
                 [glob -nocomplain logs/*messages-LC*] \
+                [glob -nocomplain logs/ppdb_prod_dump_all_lcs_*.tar.gz] \
             ]
             # Determine only the new files by subtracting old_files from new_files
             set diff_files {}
@@ -2223,9 +2208,46 @@ if {$mode == "--interactive"} {
                 
                  # Compress only the new log files into a tarball
                 #set tarball "${playbook}-[clock format [clock seconds] -format {%d-%b-%Y}].tar.gz"
-                set tarball "${playbook}-[clock format [clock seconds] -format {%d-%b-%Y-%H%M%S}].tar.gz"
+                # Use descriptive name for PPDB collections
+                if {[regexp {ppdb} $playbook]} {
+                    set tarball "ppdb_prod_dump_all_hosts_[clock format [clock seconds] -format {%Y%m%d_%H%M%S}].tar.gz"
+                } else {
+                    set tarball "${playbook}-[clock format [clock seconds] -format {%d-%b-%Y-%H%M%S}].tar.gz"
+                }
                 if {[catch {exec tar -czvf $tarball {*}$diff_files} tar_output]} {
-                    puts "======== Error compressing new scan logs: $tar_output ========"
+                    # Check if tarball was created despite error message (e.g., locale warnings)
+                    if {![file exists $tarball] || [file size $tarball] == 0} {
+                        puts "======== Error compressing new scan logs: $tar_output ========"
+                    } else {
+                        puts "======== New scan logs have been compressed into $tarball (with warnings: $tar_output) ========"
+                        
+                        # Transfer the tarball to the remote host
+                        set transfer_success [transfer_log_file $tarball $sr_number $cxd_token]
+                        if {$transfer_success} {
+                            # If the transfer succeeded, remove the local log and capture files
+                            foreach f $diff_files {
+                                if {[file exists $f]} {
+                                    file delete $f
+                                    puts "======== Local file $f removed after successful transfer. ========"
+                                }
+                            }
+                        } else {
+                            puts "======== Transfer of $tarball failed; local file retained. ========"
+                            # Copy the tarball to the /tmp/cisco/ directory for backup
+                            if {![file exists "/tmp/cisco"]} {
+                                file mkdir "/tmp/cisco"
+                            }
+                            file copy -force $tarball "/tmp/cisco/"
+                            puts "======== Tarball $tarball copied to /tmp/cisco/ for backup. ========"
+                            # If the transfer failed, remove the local log and capture files
+                            foreach f $diff_files {
+                                if {[file exists $f]} {
+                                    file delete $f
+                                    puts "======== Local file $f Removed After Unsuccessful Transfer. ========"
+                                }
+                            }
+                        }
+                    }
                 } else {
                     puts "======== New scan logs have been compressed into $tarball ========"
                     
@@ -2254,7 +2276,6 @@ if {$mode == "--interactive"} {
                                 puts "======== Local file $f Removed After Unsuccessful Transfer. ========"
                             }
                         }
-
                     }
                 }
             } else {
