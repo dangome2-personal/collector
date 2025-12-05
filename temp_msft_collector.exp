@@ -72,7 +72,7 @@ proc initialize_logging {hostname} {
     global timeout
 
 
-    set password_file [file join "/Users/dangome2/Documents/Development/msft_collector" "secret"]
+    set password_file [file join [file dirname [info script]] "secret"]
     set username $::env(USER)
 
     # Generate a unique log file name based on the current timestamp
@@ -84,7 +84,6 @@ proc initialize_logging {hostname} {
     
     # Check if the password file exists and has content
     if {[file exists $password_file] && [file size $password_file] > 0} {
-        # set password [exec cat $password_file]
         set fp [open $password_file r]
         set password [string trim [read $fp]]
         close $fp
@@ -123,9 +122,9 @@ proc pull_out_file_from_device {banner messages_LC_list sr_number cxd_token host
         puts "\n================== $banner ==================\n"
         log_user 0
         if {$ssh_port ne ""} {
-            spawn scp -P $ssh_port dangome2@$hostname:/harddisk:/$lc_file ./logs/$destination_file
+            spawn scp -P $ssh_port $username@$hostname:/harddisk:/$lc_file ./logs/$destination_file
         } else {
-            spawn scp dangome2@$hostname:/harddisk:/$lc_file ./logs/$destination_file
+            spawn scp $username@$hostname:/harddisk:/$lc_file ./logs/$destination_file
         }
         # Uncomment for production
         #spawn scp -o StrictHostKeyChecking=no $username@$hostname:$lc_file ./logs/
@@ -1069,9 +1068,11 @@ if {$mode == "--interactive"} {
         
         # Use cisco username and read password from secret file (same as showtech mode)
         set username "cisco"
-        set password_file [file join "/Users/dangome2/Documents/Development/msft_collector" "secret"]
+        set password_file [file join [file dirname [info script]] "secret"]
         if {[file exists $password_file] && [file size $password_file] > 0} {
-            set password [exec cat $password_file]
+            set fp [open $password_file r]
+            set password [string trim [read $fp]]
+            close $fp
         } else {
             puts "Password file is missing or empty!"
             exit 1
@@ -1093,11 +1094,9 @@ if {$mode == "--interactive"} {
         puts "\n================== Opening SSH Connection to ${actual_hostname}${port_info} with user: $username ==================\n"
         
         if {$ssh_port ne ""} {
-            # spawn ssh -o StrictHostKeyChecking=no -p $ssh_port $username@$actual_hostname
-            spawn ssh -o StrictHostKeyChecking=no -p $ssh_port dangome2@$actual_hostname
+            spawn ssh -o StrictHostKeyChecking=no -p $ssh_port $username@$actual_hostname
         } else {
-            # spawn ssh -o StrictHostKeyChecking=no $username@$actual_hostname
-            spawn ssh -o StrictHostKeyChecking=no dangome2@$actual_hostname
+            spawn ssh -o StrictHostKeyChecking=no $username@$actual_hostname
         }
         
         log_user 0
@@ -1105,7 +1104,7 @@ if {$mode == "--interactive"} {
             "assword:" {
                 puts "DEBUG: Password prompt detected, sending password..."
                 # send "$password\r"
-                send "TechLeadG11@2024\r"
+                send "$password\r"
                 puts "DEBUG: Password sent, waiting for response..."
                 expect {
                     -re ":.*\\$ |.*#" {
@@ -1320,15 +1319,11 @@ if {$mode == "--interactive"} {
         puts "\n================== Entering Playbook mode. Opening SSH Connection to $hostname. ================== \n"
         log_user 0
         # SSH into the IOS XR device with automatic host key acceptance
-        #spawn ssh -o StrictHostKeyChecking=no admin@$hostname
-        spawn ssh -o StrictHostKeyChecking=no dangome2@$hostname
-        #Uncomment for production
-        #spawn ssh -o StrictHostKeyChecking=no $username@$hostname
+        spawn ssh -o StrictHostKeyChecking=no $username@$hostname
         log_user 1
     
         expect {
             "assword:" {
-                #send "password\r"
                 send "$password\r"
                 #expect -re "RP/.*#"  ;# Expect the full prompt
                 expect -re ":.*\\$ |.*#"
@@ -1432,10 +1427,8 @@ if {$mode == "--interactive"} {
         log_user 0
         # SSH into the device with automatic host key acceptance
         if {$ssh_port ne ""} {
-            # spawn ssh -o StrictHostKeyChecking=no -p $ssh_port cisco@$actual_hostname
             spawn ssh -o StrictHostKeyChecking=no -p $ssh_port $username@$actual_hostname
         } else {
-            # spawn ssh -o StrictHostKeyChecking=no cisco@$actual_hostname
             spawn ssh -o StrictHostKeyChecking=no $username@$actual_hostname
         }
         log_user 1
@@ -1629,7 +1622,7 @@ if {$mode == "--interactive"} {
             pull_out_file_from_device $banner $messages_LC_list $sr_number $cxd_token $actual_hostname $password $timestamp $ssh_port
             # puts "\n================== Transferring messages-LC files from $hostname to SAW JumpServer: ================== \n"
             # foreach lc_file $messages_LC_list {
-            #     spawn scp dangome2@$hostname:/harddisk:/$lc_file ./logs/
+            #     spawn scp $username@$hostname:/harddisk:/$lc_file ./logs/
             #     # Uncomment for production
             #     #spawn scp -o StrictHostKeyChecking=no $username@$hostname:$lc_file ./logs/
             #     expect {
@@ -1778,7 +1771,7 @@ if {$mode == "--interactive"} {
         puts "\n================== Entering Showtech mode. Opening SSH Connection to ${actual_hostname}${port_info}. ================== \n"
         # SSH into the device with automatic host key acceptance
         if {$ssh_port ne ""} {
-            spawn ssh -o StrictHostKeyChecking=no -p $ssh_port cisco@$actual_hostname
+            spawn ssh -o StrictHostKeyChecking=no -p $ssh_port $username@$actual_hostname
         } else {
             spawn ssh -o StrictHostKeyChecking=no $username@$actual_hostname
         }
@@ -2013,9 +2006,7 @@ if {$mode == "--interactive"} {
 
     puts "\n================== Entering Archive Log mode. Opening SSH Connection to $hostname. ================== \n"
     # SSH into the IOS XR device with automatic host key acceptance
-    spawn ssh -o StrictHostKeyChecking=no dangome2@$hostname
-    #Uncomment for production
-    #spawn ssh -o StrictHostKeyChecking=no $username@$hostname
+    spawn ssh -o StrictHostKeyChecking=no $username@$hostname
     log_user 1
     expect {
         "assword:" {
@@ -2072,9 +2063,8 @@ if {$mode == "--interactive"} {
         for {set scp_attempt 1} {$scp_attempt <= $max_scp_retries} {incr scp_attempt} {
             puts "SCP transfer attempt $scp_attempt of $max_scp_retries..."
             
-            set scp_spawn_id [spawn scp dangome2@$hostname:/harddisk:/$archive_file ./logs]
             #Uncomment for production
-            #set scp_spawn_id [spawn scp -o StrictHostKeyChecking=no $username@$hostname:/harddisk:/$archive_file ./logs]
+            set scp_spawn_id [spawn scp -o StrictHostKeyChecking=no $username@$hostname:/harddisk:/$archive_file ./logs]
             
             set scp_failed 0
             expect {
