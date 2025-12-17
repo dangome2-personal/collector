@@ -26,3 +26,9 @@ test_results/
 
 # Interactive mode temporary playbooks
 **/msft_collector_interactive_playbook_*.playbook
+
+# Development and testing files
+TESTING.md
+msft_collector.code-workspace
+msft_collector_lab.exp
+test_output.log
