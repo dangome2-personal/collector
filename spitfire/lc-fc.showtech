@@ -1,4 +1,8 @@
 # LC-FC Showtech Collection for Cisco 8000 Series
 # Collects comprehensive technical support information for Line Card - Fabric Card issues
 
+show tech-support spi
+show tech-support cpa
+show tech-support fabric
+show tech-support install
 show tech-support os file harddisk: background compressed
