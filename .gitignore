@@ -23,3 +23,6 @@ test_results/
 
 # Temporary playbooks
 /tmp/msft_collector_*
+
+# Interactive mode temporary playbooks
+**/msft_collector_interactive_playbook_*.playbook
