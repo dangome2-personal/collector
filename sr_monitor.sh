@@ -68,9 +68,6 @@ initialize_directories() {
     mkdir -p "$COLLECTOR_DIR" "$ARCHIVE_DIR"
     touch "$PROCESSED_LOG" "$ERROR_LOG"
     
-    # Create logs directory required by msft_collector
-    mkdir -p logs
-    
     # Initialize git repo if not already initialized
     if [ ! -d "$COLLECTOR_DIR/.git" ]; then
         log_message "INFO" "Initializing git repository in $COLLECTOR_DIR"
@@ -185,8 +182,15 @@ run_collector() {
     
     while [ $attempt -le $MAX_RETRIES ]; do
         log_message "INFO" "Running collector for SR $sr_number (attempt $attempt/$MAX_RETRIES)"
+        log_message "INFO" "Current directory: $(pwd)"
         
-        # Run the collector command from current directory
+        # Ensure we're in the home directory when running msft_collector
+        cd "$HOME" || {
+            log_message "ERROR" "Failed to change to home directory"
+            return 1
+        }
+        
+        # Run the collector command - it will find the playbook automatically
         if $collector_cmd --playbook lc-fc.playbook "$hostname" "$sr_number" "$token"; then
             log_message "SUCCESS" "Collector completed successfully for SR $sr_number"
             return 0
