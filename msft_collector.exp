@@ -356,6 +356,7 @@ proc monitor_os_showtech_completion {log_file_path tgz_file_path prompt active_r
                 expect -re "$prompt"
             }
         }
+ 
         
         # Check if completion was found
         if {$completion_found == 1} {
@@ -371,6 +372,8 @@ proc monitor_os_showtech_completion {log_file_path tgz_file_path prompt active_r
         after [expr {$poll_interval_seconds * 1000}]
     }
 }
+ 
+ 
 
 # # Function to execute a command and capture its output
 proc execute_command {cmd prompt} {
@@ -379,16 +382,11 @@ proc execute_command {cmd prompt} {
     # First, wait for the command echo to complete (match the command we just sent)
     expect -re [string map {* \\* . \\. ? \\? + \\+ ( \\( ) \\) \[ \\\[ \] \\\] $ \\$ ^ \\^ | \\|} $cmd]
     
-    # Now wait for command execution and output, handling password prompts and pagination
+    # Now wait for command execution and output, handling password prompts
     expect {
         -re "(P|p)assword:" {
             # Handle sudo password prompt
             send "$::password\r"
-            exp_continue
-        }
-        -re " --More-- " {
-            # Handle pagination - send space to continue
-            send " "
             exp_continue
         }
         -re "$prompt" {
@@ -1237,12 +1235,13 @@ if {$mode == "--interactive"} {
         }
         
         log_user 0
-        exp_internal 1
+	#exp_internal 1
         expect {
             "assword:" {
                 puts "DEBUG: Password prompt detected, sending password..."
                 send "$password\r"
                 puts "DEBUG: Password sent, waiting for response..."
+
                 expect {
                     -re "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$" {
                         puts "================== Successfully connected to ${actual_hostname}${port_info} ==================\n"
@@ -1282,7 +1281,7 @@ if {$mode == "--interactive"} {
         # Detect platform and set terminal length 0 for all Cisco platforms
         log_user 0
         puts "\nDEBUG: About to run 'show version' for platform detection..."
-        exp_internal 1
+        #exp_internal 1
         execute_command "terminal length 0" "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$"
         set version_output [execute_command "show version" "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$"]
         exp_internal 0
@@ -1312,9 +1311,10 @@ if {$mode == "--interactive"} {
             execute_command $cmd_line "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$"
         }
         close $cmd_Fh
-        
-        log_user 0  ;# Disable logging for cleanup
-        
+ 
+  
+ 
+           
         # Exit SSH session
         send "exit\r"
         expect eof
@@ -1993,11 +1993,13 @@ if {$mode == "--interactive"} {
     
         # Identify platform type - try show version first for all platforms
         log_user 0
+	#exp_internal 1
         set version_output [execute_command "show version" "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$"]
+ 
         
         # If show version fails or returns empty, try IOS XR specific command
         if {[string trim $version_output] eq "" || [regexp {Invalid|Unknown|command not found} $version_output]} {
-            set version_output [execute_command "show version | include ws" "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$"]
+            set version_output [execute_command "show version | include ws" "\r\n.*:.*\\$ |\r\n.*#"]
         }
         log_user 1
         
@@ -2042,6 +2044,9 @@ if {$mode == "--interactive"} {
             exit 1
         }
         puts "DEBUG: Showtech file found and has content"
+     
+ 
+ 
     
         # Open the playbook file for reading
         set cmd_Fh [open $showtech_file r]
@@ -2121,6 +2126,8 @@ if {$mode == "--interactive"} {
                     lappend showtech_files $showtech_file
                     set file_found 1
                 }
+ 
+ 
                 
                 if {!$file_found} {
                     puts "Failed to locate show tech file path."
@@ -2375,15 +2382,11 @@ if {$mode == "--interactive"} {
                         catch {wait} wait_result
                         if {[llength $wait_result] >= 4} {
                             set exit_status [lindex $wait_result 3]
-                            # Note: Exit status 1 is often a false positive due to banner messages
-                            # If we reached EOF without explicit errors, the transfer likely succeeded
-                            # Verify by checking if the local file exists and has content
-                            set local_archive_path "./logs/$archive_file"
-                            if {[file exists $local_archive_path] && [file size $local_archive_path] > 0} {
-                                puts "\n================== File transfer from $hostname completed successfully (exit status: $exit_status) ==================\n"
+                            if {$exit_status == 0} {
+                                puts "\n================== File transfer from $hostname completed successfully ==================\n"
                                 set scp_success 1
                             } else {
-                                puts "\n================== ERROR: SCP exited with status $exit_status and file not found or empty ==================\n"
+                                puts "\n================== ERROR: SCP exited with status $exit_status ==================\n"
                                 set scp_failed 1
                             }
                         }
