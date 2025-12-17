@@ -68,6 +68,9 @@ initialize_directories() {
     mkdir -p "$COLLECTOR_DIR" "$ARCHIVE_DIR"
     touch "$PROCESSED_LOG" "$ERROR_LOG"
     
+    # Create logs directory required by msft_collector
+    mkdir -p logs
+    
     # Initialize git repo if not already initialized
     if [ ! -d "$COLLECTOR_DIR/.git" ]; then
         log_message "INFO" "Initializing git repository in $COLLECTOR_DIR"
@@ -166,11 +169,24 @@ run_collector() {
     local token="$3"
     local attempt=1
     
+    # Find msft_collector - check common locations
+    local collector_cmd=""
+    if command -v msft_collector &> /dev/null; then
+        collector_cmd="msft_collector"
+    elif [ -f "$HOME/bin/msft_collector" ]; then
+        collector_cmd="$HOME/bin/msft_collector"
+    elif [ -f "./msft_collector" ]; then
+        collector_cmd="./msft_collector"
+    else
+        log_message "ERROR" "msft_collector not found in PATH or common locations"
+        return 1
+    fi
+    
     while [ $attempt -le $MAX_RETRIES ]; do
         log_message "INFO" "Running collector for SR $sr_number (attempt $attempt/$MAX_RETRIES)"
         
         # Run the collector command
-        if msft_collector --playbook lc-fc.playbook "$hostname" "$sr_number" "$token"; then
+        if $collector_cmd --playbook lc-fc.playbook "$hostname" "$sr_number" "$token"; then
             log_message "SUCCESS" "Collector completed successfully for SR $sr_number"
             return 0
         else
