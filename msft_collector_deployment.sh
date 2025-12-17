@@ -484,51 +484,37 @@ proc monitor_os_showtech_completion {log_file_path tgz_file_path prompt active_r
         set timestamp [clock format $current_time -format {%Y-%m-%d %H:%M:%S}]
         puts "\[$timestamp\] Elapsed: $elapsed_minutes mins - Checking completion..."
         
-        # Attach to active RP to run more command (more command requires bash context)
-        send "attach location $active_rp\r"
+        # Check if TGZ file exists using dir command from XR prompt (no need to attach to bash)
+        send "dir $tgz_file_path\r"
+        
+        # Wait for command echo to complete
+        expect -re [string map {* \\* . \\. ? \\? + \\+ ( \\( ) \\) \[ \\\[ \] \\\] $ \\$ ^ \\^ | \\|} "dir $tgz_file_path"]
+        
+        # Check for file existence or "Path does not exist" error
+        set completion_found 0
         expect {
-            -re ".*#" {
-                # Successfully attached to RP bash
-            }
-            timeout {
-                puts "Timeout attaching to active RP, will retry..."
-                after [expr {$poll_interval_seconds * 1000}]
-                continue
-            }
-        }
-        
-        # Execute 'more' command to check log file
-        set check_cmd "more $log_file_path"
-        send "$check_cmd\r"
-        
-        # Wait for command echo
-        expect -re [string map {* \\* . \\. ? \\? + \\+ ( \\( ) \\) \[ \\\[ \] \\\] $ \\$ ^ \\^ | \\|} $check_cmd]
-        
-        # Capture output
-        set log_output ""
-        expect {
-            -re "#" {
-                set log_output $expect_out(buffer)
-            }
-            timeout {
-                puts "Timeout checking log file, will retry..."
-                send "exit\r"
+            -re "Path does not exist|No such file|Error:" {
+                # File doesn't exist yet, showtech still running
+                set completion_found 0
                 expect -re "$prompt"
-                after [expr {$poll_interval_seconds * 1000}]
-                continue
             }
-            eof {
-                puts "ERROR: Unexpected EOF while checking log file"
-                return 0
+            -re "showtech-os-.*\\.tgz" {
+                # File exists in directory listing - showtech complete!
+                set completion_found 1
+                expect -re "$prompt"
+            }
+            timeout {
+                puts "Timeout checking file existence, will retry..."
+                set completion_found 0
+                # Try to get back to prompt
+                send "\r"
+                expect -re "$prompt"
             }
         }
+ 
         
-        # Exit back to XR prompt
-        send "exit\r"
-        expect -re "$prompt"
-        
-        # Check if completion marker is present
-        if {[regexp {\+\+ Show tech end time} $log_output]} {
+        # Check if completion was found
+        if {$completion_found == 1} {
             set completion_time [clock format $current_time -format {%Y-%m-%d %H:%M:%S}]
             puts "\n\[$completion_time\] ================== OS showtech completed successfully! ==================\n"
             puts "Total time elapsed: $elapsed_minutes minutes"
@@ -541,6 +527,8 @@ proc monitor_os_showtech_completion {log_file_path tgz_file_path prompt active_r
         after [expr {$poll_interval_seconds * 1000}]
     }
 }
+ 
+ 
 
 # # Function to execute a command and capture its output
 proc execute_command {cmd prompt} {
@@ -577,7 +565,7 @@ proc execute_command {cmd prompt} {
 proc execute_sonic_long_command {cmd prompt} {
     global timeout
     set old_timeout $timeout
-    set timeout 1200  ;# 20 minutes for long-running commands
+    set timeout 2400  ;# 40 minutes for long-running commands
     
     puts "\n================== Executing long-running command: $cmd (timeout: 20 min) ==================\n"
     
@@ -1402,14 +1390,17 @@ if {$mode == "--interactive"} {
         }
         
         log_user 0
+	#exp_internal 1
         expect {
             "assword:" {
                 puts "DEBUG: Password prompt detected, sending password..."
                 send "$password\r"
                 puts "DEBUG: Password sent, waiting for response..."
+
                 expect {
-                    -re ":.*\\$ |.*#" {
+                    -re "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$" {
                         puts "================== Successfully connected to ${actual_hostname}${port_info} ==================\n"
+                        puts "DEBUG: Matched login prompt, buffer contents: $expect_out(buffer)"
                     }
                     -re "assword:" {
                         puts "================== ERROR: Authentication failed - wrong password for user '$username' ==================\n"
@@ -1440,18 +1431,27 @@ if {$mode == "--interactive"} {
                 exit 1
             }
         }
+        exp_internal 0
         
-        # Detect platform and add terminal length 0 for IOS-XR
+        # Detect platform and set terminal length 0 for all Cisco platforms
         log_user 0
-        set version_output [execute_command "show version" "\r\n.*:.*\\$ |\r\n.*#"]
+        puts "\nDEBUG: About to run 'show version' for platform detection..."
+        #exp_internal 1
+        execute_command "terminal length 0" "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$"
+        set version_output [execute_command "show version" "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$"]
+        exp_internal 0
+        puts "DEBUG: show version completed, output length: [string length $version_output]"
         log_user 1
         
-        # Check if this is IOS-XR (not SONiC)
-        if {![regexp -nocase {sonic} $version_output] && ([regexp {ncs5500} $version_output] || [regexp {8000} $version_output] || [regexp {IOS XR} $version_output])} {
-            puts "\n================== Detected IOS-XR platform, setting terminal length 0 ==================\n"
-            execute_command "terminal length 0" "\r\n.*:.*\\$ |\r\n.*#"
+        # Stabilize input buffer after large output to prevent first-byte drop
+        after 500
+        
+        # Send terminal length 0 for all Cisco platforms (IOS, IOS-XE, IOS-XR, NX-OS) except SONiC
+        if {![regexp -nocase {sonic} $version_output]} {
+            puts "\n================== Detected Cisco platform, setting terminal length 0 ==================\n"
+            execute_command "terminal length 0" "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$"
         } else {
-            puts "\n================== Non-IOS-XR platform detected, skipping terminal length 0 ==================\n"
+            puts "\n================== SONiC platform detected, skipping terminal length 0 ==================\n"
         }
         
         # Execute each command from the temporary playbook
@@ -1462,13 +1462,14 @@ if {$mode == "--interactive"} {
             if {[string trim $cmd_line] == "" || [string index $cmd_line 0] == "#"} {
                 continue
             }
-            # Use a more specific prompt pattern that matches at line start
-            execute_command $cmd_line "\r\n.*:.*\\$ |\r\n.*#"
+            # Use end-of-line anchored prompt pattern to avoid premature matches
+            execute_command $cmd_line "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$"
         }
         close $cmd_Fh
-        
-        log_user 0  ;# Disable logging for cleanup
-        
+ 
+  
+ 
+           
         # Exit SSH session
         send "exit\r"
         expect eof
@@ -2147,7 +2148,9 @@ if {$mode == "--interactive"} {
     
         # Identify platform type - try show version first for all platforms
         log_user 0
-        set version_output [execute_command "show version" "\r\n.*:.*\\$ |\r\n.*#"]
+	#exp_internal 1
+        set version_output [execute_command "show version" "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$"]
+ 
         
         # If show version fails or returns empty, try IOS XR specific command
         if {[string trim $version_output] eq "" || [regexp {Invalid|Unknown|command not found} $version_output]} {
@@ -2156,39 +2159,49 @@ if {$mode == "--interactive"} {
         log_user 1
         
         # Debug: Show what we captured
-        # puts "\n================== DEBUG: Version output captured: ==================\n"
-        # puts $version_output
-        # puts "\n================== END DEBUG ==================\n"
+        puts "\n================== DEBUG: Version output captured (first 500 chars): ==================\n"
+        puts [string range $version_output 0 500]
+        puts "\n================== END DEBUG ==================\n"
     
         # Determine the correct playbook directory based on platform
+        # IMPORTANT: Check SONiC first because it may contain "cisco-8000" in ASIC field
         set platform "unknown"
         set showtech_playbook_directory ""
-        if {[regexp {ncs5500} $version_output]} {
-            set platform "ncs5500"
-            set showtech_playbook_directory "fretta"
-        } elseif {[regexp {8000} $version_output]} {
-            set platform "8000"
-            set showtech_playbook_directory "spitfire"
-        } elseif {[regexp -nocase {sonic} $version_output]} {
+        if {[regexp -nocase {sonic} $version_output]} {
             # Match sonic case-insensitively to catch SONiC, sonic, SONIC, etc.
             set platform "sonic"
             set showtech_playbook_directory "sonic"
+            puts "DEBUG: Matched sonic platform"
+        } elseif {[regexp {ncs5500} $version_output]} {
+            set platform "ncs5500"
+            set showtech_playbook_directory "fretta"
+            puts "DEBUG: Matched ncs5500 platform"
+        } elseif {[regexp {8000} $version_output]} {
+            set platform "8000"
+            set showtech_playbook_directory "spitfire"
+            puts "DEBUG: Matched 8000 platform"
         } else {
             puts "Unknown platform. Exiting..."
             puts "DEBUG: Could not match platform in version output"
             exit 1
         }
     
-        #puts "Platform identified: $platform"
+        puts "Platform identified: $platform"
+        puts "Showtech directory: $showtech_playbook_directory"
     
         # Construct the full playbook path
         set showtech_file [file join $showtech_playbook_directory $showtech_playbook]
+        puts "DEBUG: Full showtech file path: $showtech_file"
     
         # Check if the playbook file exists and has content
         if {![file exists $showtech_file] || [file size $showtech_file] == 0} {
             puts "Showtech file $showtech_file is missing or empty!"
             exit 1
         }
+        puts "DEBUG: Showtech file found and has content"
+     
+ 
+ 
     
         # Open the playbook file for reading
         set cmd_Fh [open $showtech_file r]
@@ -2261,12 +2274,15 @@ if {$mode == "--interactive"} {
                     set file_found 1
                 }
                 
-                # SONiC pattern: /var/dump/sonic_dump_sonic_YYYYMMDD_HHMMSS.tar.gz
-                if {!$file_found && [regexp {(/var/dump/sonic_dump_sonic_[0-9]+_[0-9]+\.tar\.gz)} $showtech_output match showtech_file]} {
+                # SONiC pattern: /var/dump/sonic_dump_<HOSTNAME>_YYYYMMDD_HHMMSS.tar.gz
+                # Note: Hostname can contain alphanumeric, hyphens, and underscores
+                if {!$file_found && [regexp {(/var/dump/sonic_dump_[A-Za-z0-9_-]+_[0-9]+_[0-9]+\.tar\.gz)} $showtech_output match showtech_file]} {
                     puts "\n================== Show tech file located at: $showtech_file ==================\n "
                     lappend showtech_files $showtech_file
                     set file_found 1
                 }
+ 
+ 
                 
                 if {!$file_found} {
                     puts "Failed to locate show tech file path."
@@ -2516,21 +2532,27 @@ if {$mode == "--interactive"} {
                         catch {close}
                         catch {wait}
                     }
+
                     eof {
                         # Check the exit status
                         catch {wait} wait_result
                         if {[llength $wait_result] >= 4} {
                             set exit_status [lindex $wait_result 3]
-                            if {$exit_status == 0} {
-                                puts "\n================== File transfer from $hostname completed successfully ==================\n"
+                            # Note: Exit status 1 is often a false positive due to banner messages
+                            # If we reached EOF without explicit errors, the transfer likely succeeded
+                            # Verify by checking if the local file exists and has content
+                            set local_archive_path "./logs/$archive_file"
+                            if {[file exists $local_archive_path] && [file size $local_archive_path] > 0} {
+                                puts "\n================== File transfer from $hostname completed successfully (exit status: $exit_status) ==================\n"
                                 set scp_success 1
                             } else {
-                                puts "\n================== ERROR: SCP exited with status $exit_status ==================\n"
+                                puts "\n================== ERROR: SCP exited with status $exit_status and file not found or empty ==================\n"
                                 set scp_failed 1
                             }
                         }
                     }
                 }
+ 
                 
                 # If successful, break out of retry loop
                 if {$scp_success} {
