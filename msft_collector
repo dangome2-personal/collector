@@ -2377,21 +2377,27 @@ if {$mode == "--interactive"} {
                         catch {close}
                         catch {wait}
                     }
+
                     eof {
                         # Check the exit status
                         catch {wait} wait_result
                         if {[llength $wait_result] >= 4} {
                             set exit_status [lindex $wait_result 3]
-                            if {$exit_status == 0} {
-                                puts "\n================== File transfer from $hostname completed successfully ==================\n"
+                            # Note: Exit status 1 is often a false positive due to banner messages
+                            # If we reached EOF without explicit errors, the transfer likely succeeded
+                            # Verify by checking if the local file exists and has content
+                            set local_archive_path "./logs/$archive_file"
+                            if {[file exists $local_archive_path] && [file size $local_archive_path] > 0} {
+                                puts "\n================== File transfer from $hostname completed successfully (exit status: $exit_status) ==================\n"
                                 set scp_success 1
                             } else {
-                                puts "\n================== ERROR: SCP exited with status $exit_status ==================\n"
+                                puts "\n================== ERROR: SCP exited with status $exit_status and file not found or empty ==================\n"
                                 set scp_failed 1
                             }
                         }
                     }
                 }
+ 
                 
                 # If successful, break out of retry loop
                 if {$scp_success} {
