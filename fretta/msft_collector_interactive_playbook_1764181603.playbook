@@ -1,0 +1,4 @@
+terminal length 0
+show version
+show platform
+sudo fwutil show status

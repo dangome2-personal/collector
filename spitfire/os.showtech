@@ -1,0 +1,5 @@
+# Spitfire (8000 series) OS Showtech Playbook
+# This playbook collects the OS show tech-support in background mode
+# The script will automatically monitor the log file for completion
+
+show tech-support os file harddisk: background compressed

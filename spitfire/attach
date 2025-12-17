@@ -1,0 +1,9 @@
+attach location 0/0/CPU0
+pd_aib_show_prod -P0
+exit
+attach location 0/1/CPU0
+pd_aib_show_prod -P0
+exit
+attach location 0/2/CPU0
+pd_aib_show_prod -P0
+exit

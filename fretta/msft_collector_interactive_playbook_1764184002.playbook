@@ -1,0 +1,3 @@
+show version
+show platform
+sudo fwutils show status

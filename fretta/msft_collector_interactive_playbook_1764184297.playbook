@@ -1,0 +1,2 @@
+sudo fwutils show status
+show version

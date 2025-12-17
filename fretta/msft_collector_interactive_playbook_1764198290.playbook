@@ -1,0 +1,4 @@
+show ofa resources nhgroup location 0/1/cpu0 | inc "num ecmp_grp delete fail"
+show ofa resources lspnh location 0/1/CPU0 | inc "num pref_obj delete fail"
+show cef global summary protocol ipv4-mpls object-table location 0/1/CPU0
+show cef global summary protocol ipv6-mpls object-table location 0/1/CPU0

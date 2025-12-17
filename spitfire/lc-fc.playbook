@@ -1,0 +1,5 @@
+# LC-FC Troubleshooting Playbook for Cisco 8000 Series
+# This playbook collects diagnostic information for Line Card - Fabric Card issues
+
+show version
+show controllers npu link-info rx 0 255 topo instance all location all | ex "EN/UP|NC              NC"

@@ -1,0 +1,3 @@
+show version
+show paltform
+sudo fwutils show status

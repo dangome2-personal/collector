@@ -1,0 +1,16 @@
+# PPDB Collection Playbook for Spitfire (8000 Series)
+# This playbook collects PPDB (Platform Database) files from all line cards
+# 
+# The script will automatically:
+# 1. Run 'show platform' to discover all line cards and active RP
+# 2. For each LC: attach, run pd_aib_show_prod, rename file, SCP to active RP
+# 3. Compress all files on active RP into timestamped tarball
+# 4. Transfer tarball to jumpserver and upload to cxd.cisco.com
+#
+# Usage:
+#   msft_collector --playbook-scan ppdb_collection.playbook <hostname> <sr_number> <cxd_token>
+#
+# Expected execution time: ~2-5 minutes per LC + compression time
+
+show ppinfo producer trace all location all
+pd_aib_show_prod -P0
