@@ -171,6 +171,7 @@ run_collector() {
     
     # Find msft_collector - check common locations
     local collector_cmd=""
+    
     if command -v msft_collector &> /dev/null; then
         collector_cmd="msft_collector"
     elif [ -f "$HOME/bin/msft_collector" ]; then
@@ -185,7 +186,7 @@ run_collector() {
     while [ $attempt -le $MAX_RETRIES ]; do
         log_message "INFO" "Running collector for SR $sr_number (attempt $attempt/$MAX_RETRIES)"
         
-        # Run the collector command
+        # Run the collector command from current directory
         if $collector_cmd --playbook lc-fc.playbook "$hostname" "$sr_number" "$token"; then
             log_message "SUCCESS" "Collector completed successfully for SR $sr_number"
             return 0
