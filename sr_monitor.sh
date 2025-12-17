@@ -315,10 +315,48 @@ process_sr_file() {
 }
 
 ################################################################################
+# Function: git_pull_updates
+# Purpose: Pull latest files from git repository before scanning
+################################################################################
+git_pull_updates() {
+    cd "$COLLECTOR_DIR" || return 1
+    
+    # Check if this is a git repository
+    if [ ! -d ".git" ]; then
+        log_message "WARN" "Not a git repository, skipping git pull"
+        return 0
+    fi
+    
+    log_message "INFO" "Pulling latest updates from git repository"
+    
+    # Attempt git pull with retry logic
+    local attempt=1
+    while [ $attempt -le $MAX_RETRIES ]; do
+        if git pull 2>&1; then
+            log_message "SUCCESS" "Git pull completed successfully"
+            return 0
+        else
+            log_message "WARN" "Git pull failed (attempt $attempt/$MAX_RETRIES)"
+            if [ $attempt -lt $MAX_RETRIES ]; then
+                sleep $RETRY_DELAY
+            fi
+        fi
+        ((attempt++))
+    done
+    
+    log_message "ERROR" "Git pull failed after $MAX_RETRIES attempts"
+    # Don't fail the scan, just log the warning
+    return 0
+}
+
+################################################################################
 # Function: scan_directory
 # Purpose: Scan for new SR files and process them
 ################################################################################
 scan_directory() {
+    # Pull latest updates from git first
+    git_pull_updates
+    
     log_message "INFO" "Scanning $COLLECTOR_DIR for new SR files"
     
     local processed_count=0
