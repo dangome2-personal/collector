@@ -77,7 +77,7 @@ set messages_LC_list {}
 # This function initializes the logging process by setting up necessary variables,
 # generating a unique log file name, checking the password file, setting a timeout,
 # and starting the logging process.
-proc initialize_logging {hostname {skip_timestamp 0}} {
+proc initialize_logging {hostname {skip_timestamp 0} {prefix ""}} {
     global log_file
     global username
     global password
@@ -90,12 +90,12 @@ proc initialize_logging {hostname {skip_timestamp 0}} {
     # Generate a unique log file name based on the current timestamp
     # set timestamp [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
 
-    # Generate a unique log file name (optionally with timestamp)
+    # Generate a unique log file name (optionally with timestamp and prefix)
     if {$skip_timestamp} {
-        set log_file "logs/${hostname}.log"
+        set log_file "logs/${prefix}${hostname}.log"
     } else {
         set timestamp [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
-        set log_file "logs/${hostname}_${timestamp}.log"
+        set log_file "logs/${prefix}${hostname}_${timestamp}.log"
     }
     
     # Check if the password file exists and has content
@@ -806,7 +806,7 @@ proc execute_lc_fc_sequence {hostname sr_number cxd_token} {
     puts "\n\[PHASE 1/3\] Executing lc-fc.playbook commands...\n"
     
     if {[catch {
-        set cmd_pipe [open "|$script_path --no-lc-fc-detection --playbook lc-fc.playbook $hostname $sr_number $cxd_token 2>@1" r]
+        set cmd_pipe [open "|$script_path --no-lc-fc-detection --lcfc-prefix --playbook lc-fc.playbook $hostname $sr_number $cxd_token 2>@1" r]
         while {[gets $cmd_pipe line] >= 0} {
             puts $line
         }
@@ -1029,6 +1029,13 @@ if {[llength $argv] == 0 || [lindex $argv 0] == "--help" || [lindex $argv 0] == 
 set no_lc_fc_detection 0
 if {[lindex $argv 0] == "--no-lc-fc-detection"} {
     set no_lc_fc_detection 1
+    set argv [lrange $argv 1 end]
+}
+
+# Check for --lcfc-prefix flag and remove it from argv if present
+set lcfc_prefix ""
+if {[lindex $argv 0] == "--lcfc-prefix"} {
+    set lcfc_prefix "LCFC-"
     set argv [lrange $argv 1 end]
 }
 
@@ -1467,8 +1474,8 @@ if {$mode == "--interactive"} {
         # This function initializes the logging process by setting up necessary variables,
         # generating a unique log file name, checking the password file, setting a timeout,
         # and starting the logging process.
-        initialize_logging $hostname
-        
+        initialize_logging $hostname 0 $lcfc_prefix
+
         puts "================== Log start time: [clock format [clock seconds] -format {%Y-%m-%d %H:%M:%S}]==================\n"
 
         # Trim any empty lines from the file
@@ -1604,8 +1611,8 @@ if {$mode == "--interactive"} {
         # This function initializes the logging process by setting up necessary variables,
         # generating a unique log file name, checking the password file, setting a timeout,
         # and starting the logging process.
-        initialize_logging $actual_hostname 1
-        
+        initialize_logging $actual_hostname 1 $lcfc_prefix
+
         puts "================== Log start time: [clock format [clock seconds] -format {%Y-%m-%d %H:%M:%S}]==================\n"
 
         # Trim any empty lines from the file
