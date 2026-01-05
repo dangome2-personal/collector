@@ -146,7 +146,6 @@ echo -e "terminal length 0\nshow version\nshow platform\nshow im database brief 
 
 echo -e "show tech-support fabric\nshow tech-support optics\nshow tech-support platform-fwd\nshow tech-support pfi\nshow tech-support ofa\nshow tech-support interface\nshow tech-support ethernet interfaces\nshow tech ethernet controllers\nshow tech-support bundles" > spitfire/interfaces.showtech
 
-echo -e "terminal length 0\nshow version\nshow platform\nshow install active summary\nshow logging | exc \"macsec|ssh_syslog_proxy|locald\"\nshow cli history detail\nshow context\nshow environment power\nshow shelfmgr history oir\nshow shelfmgr history events\nshow shelfmgr history events detail\nshow reboot history detail\nshow led\nshow alarms\nshow controllers fabric health\nshow controllers fabric fsdb-pla rack 0\nshow controllers fabric plane all detail\nshow asic-errors all detail location 0/RP0/CPU0 | inc \"rx_link_status_down|count|npu\"\nshow controllers npu link-info rx 0 255 topo instance all location all | ex \"EN/UP\|NC              NC\"" > spitfire/lc-fc.playbook
 
 # Create and populate msft_collector file
 cat << 'EOF' > msft_collector
