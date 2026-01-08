@@ -9,6 +9,7 @@
 
 # Configuration
 COLLECTOR_DIR="/tmp/cisco/collector"
+SR_DIR="/tmp/cisco/collector/service_request"
 PROCESSED_LOG="/tmp/cisco/collector/.processed_srs"
 ERROR_LOG="/tmp/cisco/collector/.error_log"
 ARCHIVE_DIR="/tmp/cisco/collector/archive"
@@ -65,7 +66,7 @@ release_lock() {
 # Purpose: Create necessary directories and files
 ################################################################################
 initialize_directories() {
-    mkdir -p "$COLLECTOR_DIR" "$ARCHIVE_DIR"
+    mkdir -p "$COLLECTOR_DIR" "$SR_DIR" "$ARCHIVE_DIR"
     touch "$PROCESSED_LOG" "$ERROR_LOG"
     
     # Initialize git repo if not already initialized
@@ -100,59 +101,134 @@ mark_processed() {
 
 ################################################################################
 # Function: validate_file_format
-# Purpose: Validate that file contains expected format
+# Purpose: Validate that file contains expected format (old or new)
 # Returns: 0 if valid, 1 if invalid
 ################################################################################
 validate_file_format() {
     local file="$1"
     local content=$(cat "$file")
+    local first_line=$(head -n 1 "$file")
     
-    # Check if file has exactly 3 space-separated fields
-    local field_count=$(echo "$content" | wc -w | tr -d ' ')
-    if [ "$field_count" -ne 3 ]; then
-        log_message "ERROR" "Invalid format in $file: Expected 3 fields, got $field_count"
-        return 1
+    # Detect format type
+    if [[ "$first_line" =~ ^(Service\ Request:|SR:) ]]; then
+        # New key-value format
+        log_message "INFO" "Detected new key-value format in $file"
+        
+        # Check for required fields
+        if ! grep -q "^Service Request:\|^SR:" "$file"; then
+            log_message "ERROR" "Missing SR field in $file"
+            return 1
+        fi
+        
+        if ! grep -q "^Hostname:\|^Host:" "$file"; then
+            log_message "ERROR" "Missing Hostname field in $file"
+            return 1
+        fi
+        
+        if ! grep -q "^CXD Token:\|^Token:" "$file"; then
+            log_message "ERROR" "Missing Token field in $file"
+            return 1
+        fi
+        
+        # Extract and validate SR number
+        local sr_number=$(grep "^Service Request:\|^SR:" "$file" | head -n 1 | sed 's/^Service Request: *//;s/^SR: *//' | tr -d ' ')
+        if ! [[ "$sr_number" =~ ^[0-9]{9}$ ]]; then
+            log_message "ERROR" "Invalid SR number format in $file: $sr_number (expected 9 digits)"
+            return 1
+        fi
+        
+        return 0
+    else
+        # Old 3-field format (space-separated)
+        log_message "INFO" "Detected old 3-field format in $file"
+        
+        # Check if file has exactly 3 space-separated fields
+        local field_count=$(echo "$content" | wc -w | tr -d ' ')
+        if [ "$field_count" -ne 3 ]; then
+            log_message "ERROR" "Invalid format in $file: Expected 3 fields, got $field_count"
+            return 1
+        fi
+        
+        # Extract fields
+        local hostname=$(echo "$content" | awk '{print $1}')
+        local sr_number=$(echo "$content" | awk '{print $2}')
+        local token=$(echo "$content" | awk '{print $3}')
+        
+        # Validate SR number is 9 digits
+        if ! [[ "$sr_number" =~ ^[0-9]{9}$ ]]; then
+            log_message "ERROR" "Invalid SR number format in $file: $sr_number (expected 9 digits)"
+            return 1
+        fi
+        
+        # Validate hostname is not empty
+        if [ -z "$hostname" ]; then
+            log_message "ERROR" "Empty hostname in $file"
+            return 1
+        fi
+        
+        # Validate token is not empty
+        if [ -z "$token" ]; then
+            log_message "ERROR" "Empty token in $file"
+            return 1
+        fi
+        
+        return 0
     fi
-    
-    # Extract fields
-    local hostname=$(echo "$content" | awk '{print $1}')
-    local sr_number=$(echo "$content" | awk '{print $2}')
-    local token=$(echo "$content" | awk '{print $3}')
-    
-    # Validate SR number is 9 digits
-    if ! [[ "$sr_number" =~ ^[0-9]{9}$ ]]; then
-        log_message "ERROR" "Invalid SR number format in $file: $sr_number (expected 9 digits)"
-        return 1
-    fi
-    
-    # Validate hostname is not empty
-    if [ -z "$hostname" ]; then
-        log_message "ERROR" "Empty hostname in $file"
-        return 1
-    fi
-    
-    # Validate token is not empty
-    if [ -z "$token" ]; then
-        log_message "ERROR" "Empty token in $file"
-        return 1
-    fi
-    
-    return 0
 }
 
 ################################################################################
 # Function: parse_sr_file
-# Purpose: Extract hostname, SR number, and token from file
+# Purpose: Extract hostname, SR number, token, mode, and playbook from file
 ################################################################################
 parse_sr_file() {
     local file="$1"
-    local content=$(cat "$file")
+    local first_line=$(head -n 1 "$file")
     
-    HOSTNAME=$(echo "$content" | awk '{print $1}')
-    SR_NUMBER=$(echo "$content" | awk '{print $2}')
-    CXD_TOKEN=$(echo "$content" | awk '{print $3}')
+    # Initialize optional fields
+    MODE=""
+    PLAYBOOK_FILE=""
     
-    log_message "INFO" "Parsed: hostname=$HOSTNAME, SR=$SR_NUMBER, token=${CXD_TOKEN:0:5}..."
+    if [[ "$first_line" =~ ^(Service\ Request:|SR:) ]]; then
+        # New key-value format
+        SR_NUMBER=$(grep "^Service Request:\|^SR:" "$file" | head -n 1 | sed 's/^Service Request: *//;s/^SR: *//' | tr -d ' ')
+        HOSTNAME=$(grep "^Hostname:\|^Host:" "$file" | head -n 1 | sed 's/^Hostname: *//;s/^Host: *//' | xargs)
+        CXD_TOKEN=$(grep "^CXD Token:\|^Token:" "$file" | head -n 1 | sed 's/^CXD Token: *//;s/^Token: *//' | xargs)
+        
+        # Parse optional Mode field
+        if grep -q "^Mode:" "$file"; then
+            MODE=$(grep "^Mode:" "$file" | head -n 1 | sed 's/^Mode: *//' | xargs)
+            log_message "INFO" "Mode detected: $MODE"
+        fi
+        
+        # Parse optional Playbook (multi-line commands)
+        if grep -q "^Playbook-Start:" "$file"; then
+            log_message "INFO" "Playbook detected in file"
+            
+            # Create temporary playbook file
+            PLAYBOOK_FILE="/tmp/msft_collector_playbook_${SR_NUMBER}_$(date +%s).txt"
+            
+            # Extract commands between Playbook-Start: and Playbook-End:
+            sed -n '/^Playbook-Start:/,/^Playbook-End:/p' "$file" | \
+                grep -v "^Playbook-Start:" | \
+                grep -v "^Playbook-End:" | \
+                grep -v "^$" | \
+                grep -v "^#" > "$PLAYBOOK_FILE"
+            
+            # Add END marker for interactive mode
+            echo "END" >> "$PLAYBOOK_FILE"
+            
+            local cmd_count=$(wc -l < "$PLAYBOOK_FILE")
+            log_message "INFO" "Extracted $cmd_count commands to $PLAYBOOK_FILE"
+        fi
+    else
+        # Old 3-field format
+        local content=$(cat "$file")
+        HOSTNAME=$(echo "$content" | awk '{print $1}')
+        SR_NUMBER=$(echo "$content" | awk '{print $2}')
+        CXD_TOKEN=$(echo "$content" | awk '{print $3}')
+    fi
+    
+    log_message "INFO" "Parsed: hostname=$HOSTNAME, SR=$SR_NUMBER, token=${CXD_TOKEN:0:5}..., mode=${MODE:-default}"
 }
 
 ################################################################################
@@ -164,34 +240,83 @@ run_collector() {
     local hostname="$1"
     local sr_number="$2"
     local token="$3"
+    local mode="${4:-}"
+    local playbook_file="${5:-}"
     local attempt=1
     
     # Find msft_collector - check common locations
     local collector_cmd=""
+    local collector_dir=""
     
     if command -v msft_collector &> /dev/null; then
         collector_cmd="msft_collector"
+        log_message "INFO" "Found msft_collector in PATH"
     elif [ -f "$HOME/bin/msft_collector" ]; then
         collector_cmd="$HOME/bin/msft_collector"
+        collector_dir="$HOME/bin"
+        log_message "INFO" "Found msft_collector in $HOME/bin"
     elif [ -f "./msft_collector" ]; then
         collector_cmd="./msft_collector"
+        collector_dir="."
+        log_message "INFO" "Found msft_collector in current directory"
     else
-        log_message "ERROR" "msft_collector not found in PATH or common locations"
+        log_message "ERROR" "msft_collector not found in PATH, $HOME/bin, or current directory"
         return 1
     fi
     
     while [ $attempt -le $MAX_RETRIES ]; do
         log_message "INFO" "Running collector for SR $sr_number (attempt $attempt/$MAX_RETRIES)"
-        log_message "INFO" "Current directory: $(pwd)"
+        log_message "INFO" "Mode: ${mode:-default (lc-fc playbook)}"
         
-        # Ensure we're in the home directory when running msft_collector
-        cd "$HOME" || {
-            log_message "ERROR" "Failed to change to home directory"
-            return 1
-        }
+        # Change to collector directory if specified, otherwise HOME
+        if [ -n "$collector_dir" ]; then
+            cd "$collector_dir" || {
+                log_message "ERROR" "Failed to change to collector directory: $collector_dir"
+                return 1
+            }
+        else
+            cd "$HOME" || {
+                log_message "ERROR" "Failed to change to home directory"
+                return 1
+            }
+        fi
         
-        # Run the collector command - it will find the playbook automatically
-        if $collector_cmd --playbook lc-fc.playbook "$hostname" "$sr_number" "$token"; then
+        local cmd_success=false
+        
+        # Determine which mode to run
+        if [ "$mode" = "interactive" ] && [ -n "$playbook_file" ] && [ -f "$playbook_file" ]; then
+            # Interactive mode with playbook file - pipe commands to stdin
+            log_message "INFO" "Running interactive mode with playbook from $playbook_file"
+            if cat "$playbook_file" | $collector_cmd --interactive "$hostname" "$sr_number" "$token"; then
+                cmd_success=true
+            fi
+        elif [ "$mode" = "interactive" ]; then
+            # Interactive mode without playbook - will fail, so fall back to default
+            log_message "WARN" "Interactive mode specified without playbook, falling back to default lc-fc.playbook"
+            if $collector_cmd --playbook lc-fc.playbook "$hostname" "$sr_number" "$token"; then
+                cmd_success=true
+            fi
+        elif [ -n "$mode" ]; then
+            # Other mode specified (e.g., --playbook, --showtech, --archive-log)
+            log_message "INFO" "Running collector with mode: $mode"
+            if $collector_cmd "$mode" "$hostname" "$sr_number" "$token"; then
+                cmd_success=true
+            fi
+        else
+            # Default: use lc-fc.playbook
+            log_message "INFO" "Running collector with default lc-fc.playbook"
+            if $collector_cmd --playbook lc-fc.playbook "$hostname" "$sr_number" "$token"; then
+                cmd_success=true
+            fi
+        fi
+        
+        # Cleanup temporary playbook file if it exists
+        if [ -n "$playbook_file" ] && [ -f "$playbook_file" ]; then
+            rm -f "$playbook_file"
+            log_message "INFO" "Cleaned up temporary playbook file"
+        fi
+        
+        if [ "$cmd_success" = true ]; then
             log_message "SUCCESS" "Collector completed successfully for SR $sr_number"
             return 0
         else
@@ -223,20 +348,23 @@ git_commit_and_push() {
     
     cd "$COLLECTOR_DIR" || return 1
     
+    # File path relative to git repo root
+    local git_file_path="service_request/$filename"
+    
     while [ $attempt -le $MAX_RETRIES ]; do
-        log_message "INFO" "Git operations for $filename (attempt $attempt/$MAX_RETRIES)"
+        log_message "INFO" "Git operations for $git_file_path (attempt $attempt/$MAX_RETRIES)"
         
         # Add file to git if not tracked
-        if ! git ls-files --error-unmatch "$filename" > /dev/null 2>&1; then
-            log_message "INFO" "File $filename not tracked in git, adding it first"
-            git add "$filename"
-            git commit -m "Adding SR file $filename before removal" || true
+        if ! git ls-files --error-unmatch "$git_file_path" > /dev/null 2>&1; then
+            log_message "INFO" "File $git_file_path not tracked in git, adding it first"
+            git add "$git_file_path"
+            git commit -m "Adding SR file $git_file_path before removal" || true
         fi
         
         # Remove from git
-        if git rm --cached "$filename" 2>/dev/null; then
+        if git rm --cached "$git_file_path" 2>/dev/null; then
             # Commit the removal
-            if git commit -m "Removing $filename - SR $sr_number collection completed successfully"; then
+            if git commit -m "Removing $git_file_path - SR $sr_number collection completed successfully"; then
                 # Try to push
                 if git push 2>&1; then
                     log_message "SUCCESS" "Git push completed for SR $sr_number"
@@ -277,13 +405,21 @@ archive_file() {
     local timestamp=$(date '+%Y%m%d_%H%M%S')
     local archive_name="${sr_number}_${timestamp}_${status}"
     
-    if mv "$COLLECTOR_DIR/$filename" "$ARCHIVE_DIR/$archive_name"; then
-        log_message "INFO" "Archived $filename as $archive_name"
-        return 0
-    else
-        log_message "ERROR" "Failed to archive $filename"
-        return 1
+    # Try to move from SR_DIR first, then fallback to COLLECTOR_DIR
+    if [ -f "$SR_DIR/$filename" ]; then
+        if mv "$SR_DIR/$filename" "$ARCHIVE_DIR/$archive_name"; then
+            log_message "INFO" "Archived $filename as $archive_name"
+            return 0
+        fi
+    elif [ -f "$COLLECTOR_DIR/$filename" ]; then
+        if mv "$COLLECTOR_DIR/$filename" "$ARCHIVE_DIR/$archive_name"; then
+            log_message "INFO" "Archived $filename as $archive_name"
+            return 0
+        fi
     fi
+    
+    log_message "ERROR" "Failed to archive $filename"
+    return 1
 }
 
 ################################################################################
@@ -313,8 +449,8 @@ process_sr_file() {
         return 0
     fi
     
-    # Run the collector
-    if run_collector "$HOSTNAME" "$SR_NUMBER" "$CXD_TOKEN"; then
+    # Run the collector with mode and playbook if specified
+    if run_collector "$HOSTNAME" "$SR_NUMBER" "$CXD_TOKEN" "$MODE" "$PLAYBOOK_FILE"; then
         # Mark as processed immediately after successful collection
         mark_processed "$SR_NUMBER"
         
@@ -378,13 +514,13 @@ scan_directory() {
     # Pull latest updates from git first
     git_pull_updates
     
-    log_message "INFO" "Scanning $COLLECTOR_DIR for new SR files"
+    log_message "INFO" "Scanning $SR_DIR for new SR files"
     
     local processed_count=0
     local failed_count=0
     
-    # Find all 9-digit named files (SR numbers)
-    for file in "$COLLECTOR_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]; do
+    # Find all 9-digit named files (SR numbers) in service_request subdirectory
+    for file in "$SR_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]; do
         # Check if file exists (pattern may not match anything)
         [ -f "$file" ] || continue
         
@@ -408,7 +544,7 @@ watch_mode() {
     local interval="${1:-30}"  # Default 30 seconds
     
     log_message "INFO" "Starting watch mode (checking every ${interval}s)"
-    echo -e "${GREEN}Monitoring $COLLECTOR_DIR for new SR files...${NC}"
+    echo -e "${GREEN}Monitoring $SR_DIR for new SR files...${NC}"
     echo -e "${YELLOW}Press Ctrl+C to stop${NC}\n"
     
     while true; do
@@ -435,7 +571,7 @@ show_usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-Monitor /tmp/cisco/collector for new Service Request files and process them.
+Monitor /tmp/cisco/collector/service_request for new Service Request files and process them.
 
 OPTIONS:
     -h, --help          Show this help message
@@ -454,8 +590,26 @@ EXAMPLES:
 
 FILES:
     Expected file format: <SR_NUMBER> (9 digits)
+    
+    OLD FORMAT (backward compatible):
     File content: <HOSTNAME> <SR_NUMBER> <CXD_TOKEN>
     Example: CHI21-0101-0200-14T2 700197076 JjsCaNeNHDw5VWxP
+    
+    NEW FORMAT (key-value with optional mode and playbook):
+    Service Request: 700240554
+    Hostname: SAT46-0101-0100-02T2
+    CXD Token: Vqf2wU8tonkhvy2B
+    Mode: interactive
+    Playbook-Start:
+    terminal length 0
+    show version
+    show platform
+    Playbook-End:
+    Timestamp: 2026-01-05T22:50:59.395488
+    
+    Optional Fields:
+    - Mode: interactive, --playbook, --showtech, --archive-log (default: lc-fc.playbook)
+    - Playbook-Start:/Playbook-End: Multi-line commands for interactive mode
 
 EOF
 }
