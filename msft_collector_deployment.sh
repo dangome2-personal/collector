@@ -382,6 +382,94 @@ proc transfer_log_file {log_file sr_number cxd_token} {
     return $transfer_successful
 }
 
+################################################################################
+# Function: upload_unreachable_notification
+# Purpose: Create and upload notification when device is unreachable
+# Parameters:
+#   - hostname: Device hostname
+#   - sr_number: Service request number
+#   - cxd_token: Authentication token
+################################################################################
+proc upload_unreachable_notification {hostname sr_number cxd_token} {
+    global env
+    
+    set timestamp [clock format [clock seconds] -format "%Y%m%d_%H%M%S"]
+    set username $env(USER)
+    
+    # Create NOT-REACHABLE log filename
+    set log_filename "NOT-REACHABLE-${hostname}_${timestamp}.log"
+    set local_log_path "/tmp/${log_filename}"
+    
+    puts "\n=== Device Unreachable - Creating Diagnostic Log ==="
+    puts "Hostname: $hostname"
+    puts "SR Number: $sr_number"
+    puts "Log file: $log_filename"
+    
+    # Create log file with diagnostic information
+    set log_fd [open $local_log_path w]
+    puts $log_fd "=========================================="
+    puts $log_fd "Device Unreachable Notification"
+    puts $log_fd "=========================================="
+    puts $log_fd "Timestamp: [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]"
+    puts $log_fd "Hostname: $hostname"
+    puts $log_fd "Service Request: $sr_number"
+    puts $log_fd "User: $username"
+    puts $log_fd "Mode: --interactive"
+    puts $log_fd ""
+    puts $log_fd "=========================================="
+    puts $log_fd "Connectivity Test Results"
+    puts $log_fd "=========================================="
+    puts $log_fd ""
+    
+    # Perform 3 ping attempts and log results
+    for {set i 1} {$i <= 3} {incr i} {
+        puts $log_fd "--- Ping Attempt $i/3 ---"
+        puts $log_fd "Command: ping -c 1 -W 1 $hostname"
+        
+        if {[catch {exec ping -c 1 -W 1 $hostname} ping_output]} {
+            puts $log_fd "Result: FAILED"
+            puts $log_fd "Output:"
+            puts $log_fd $ping_output
+        } else {
+            puts $log_fd "Result: SUCCESS"
+            puts $log_fd "Output:"
+            puts $log_fd $ping_output
+        }
+        puts $log_fd ""
+        
+        if {$i < 3} {
+            sleep 1
+        }
+    }
+    
+    puts $log_fd "=========================================="
+    puts $log_fd "Conclusion"
+    puts $log_fd "=========================================="
+    puts $log_fd "Device $hostname is not reachable after 3 ping attempts."
+    puts $log_fd "Collection cannot proceed for SR $sr_number."
+    puts $log_fd ""
+    
+    close $log_fd
+    
+    puts "Diagnostic log created: $local_log_path"
+    
+    # Upload using existing transfer_log_file function (has retry logic built-in)
+    puts "Uploading unreachable notification to cxd.cisco.com..."
+    set upload_result [transfer_log_file $local_log_path $log_filename $cxd_token]
+    
+    if {$upload_result == 0} {
+        puts "✓ Unreachable notification uploaded successfully"
+        # Clean up local file only on successful upload
+        file delete $local_log_path
+        puts "✓ Local diagnostic file removed"
+    } else {
+        puts "✗ Failed to upload unreachable notification"
+        puts "✗ Local file retained at: $local_log_path"
+    }
+    
+    return $upload_result
+}
+
 # Function to generate timestamp in IOS-XR format: 2025-Dec-04.180630.UTC
 proc generate_timestamp {} {
     set now [clock seconds]
@@ -1231,81 +1319,118 @@ if {$mode == "--interactive"} {
 
     set timeout -1
     
-    # Save current terminal settings and configure for raw input
-    set stty_settings [exec stty -g]
-    exec stty raw -echo
+    # Detect if stdin is a TTY (terminal) or pipe
+    set is_tty [catch {exec test -t 0}]
     
-    # Set up trap for Ctrl+C (SIGINT)
-    trap {
-        # Restore terminal settings on interrupt
-        exec stty $stty_settings
-        send_user "\n\n================== Interrupted by user (Ctrl+C). Exiting command collection. ================== \n\n"
-        # Clean up and exit
-        if {[info exists temp_playbook] && [file exists $temp_playbook]} {
-            file delete $temp_playbook
-        }
-        if {[info exists hostfile] && [file exists $hostfile]} {
-            file delete $hostfile
-        }
-        exit 0
-    } SIGINT
-    
-    # Collect commands from the user
-    while {1} {
-        # Display custom prompt
-        send_user "\nMicrosoft Collector - Interactive> "
+    if {$is_tty == 0} {
+        # Interactive mode - TTY detected
+        puts "Interactive mode: Enter commands one per line"
+        puts "Type 'END' when finished or press Ctrl+C to exit"
+        puts "----------------------------------------"
         
-        # Read input character by character to handle backspace
-        set user_cmd ""
+        # Save current terminal settings and configure for raw input
+        set stty_settings [exec stty -g]
+        exec stty raw -echo
         
+        # Set up trap for Ctrl+C (SIGINT)
+        trap {
+            # Restore terminal settings on interrupt
+            exec stty $stty_settings
+            send_user "\n\n================== Interrupted by user (Ctrl+C). Exiting command collection. ================== \n\n"
+            # Clean up and exit
+            if {[info exists temp_playbook] && [file exists $temp_playbook]} {
+                file delete $temp_playbook
+            }
+            if {[info exists hostfile] && [file exists $hostfile]} {
+                file delete $hostfile
+            }
+            exit 0
+        } SIGINT
+        
+        # Collect commands from the user with backspace support
         while {1} {
-            expect_user -re "(.)" {
-                set char $expect_out(1,string)
-                scan $char %c ascii_val
-                
-                # Handle different key inputs
-                if {$ascii_val == 3} {
-                    # Ctrl+C - exit gracefully
-                    exec stty $stty_settings
-                    send_user "\n\n================== Interrupted by user (Ctrl+C). Exiting command collection. ================== \n\n"
-                    exit 0
-                } elseif {$ascii_val == 13 || $ascii_val == 10} {
-                    # Enter key
-                    send_user "\r\n"
-                    break
-                } elseif {$ascii_val == 127 || $ascii_val == 8} {
-                    # Backspace (DEL=127 or BS=8)
-                    if {[string length $user_cmd] > 0} {
-                        # Remove last character from command
-                        set user_cmd [string range $user_cmd 0 end-1]
-                        # Visually erase the character (backspace, space, backspace)
-                        send_user "\b \b"
+            # Display custom prompt
+            send_user "\nMicrosoft Collector - Interactive> "
+            
+            # Read input character by character to handle backspace
+            set user_cmd ""
+            
+            while {1} {
+                expect_user -re "(.)" {
+                    set char $expect_out(1,string)
+                    scan $char %c ascii_val
+                    
+                    # Handle different key inputs
+                    if {$ascii_val == 3} {
+                        # Ctrl+C - exit gracefully
+                        exec stty $stty_settings
+                        send_user "\n\n================== Interrupted by user (Ctrl+C). Exiting command collection. ================== \n\n"
+                        exit 0
+                    } elseif {$ascii_val == 13 || $ascii_val == 10} {
+                        # Enter key
+                        send_user "\r\n"
+                        break
+                    } elseif {$ascii_val == 127 || $ascii_val == 8} {
+                        # Backspace (DEL=127 or BS=8)
+                        if {[string length $user_cmd] > 0} {
+                            # Remove last character from command
+                            set user_cmd [string range $user_cmd 0 end-1]
+                            # Visually erase the character (backspace, space, backspace)
+                            send_user "\b \b"
+                        }
+                    } elseif {$ascii_val == 27} {
+                        # Escape sequence (arrow keys, etc.) - ignore them
+                        # Read and discard the rest of the escape sequence
+                        expect_user -timeout 0.1 -re ".*" {}
+                    } elseif {$ascii_val >= 32 && $ascii_val < 127} {
+                        # Regular printable character
+                        append user_cmd $char
+                        send_user -- $char
                     }
-                } elseif {$ascii_val == 27} {
-                    # Escape sequence (arrow keys, etc.) - ignore them
-                    # Read and discard the rest of the escape sequence
-                    expect_user -timeout 0.1 -re ".*" {}
-                } elseif {$ascii_val >= 32 && $ascii_val < 127} {
-                    # Regular printable character
-                    append user_cmd $char
-                    send_user -- $char
                 }
             }
-        }
 
-        # Check for termination keywords (END or exit)
-        set trimmed_cmd [string trim $user_cmd]
-        if {$trimmed_cmd eq "END" || $trimmed_cmd eq "exit"} {
-            # Restore terminal settings before exiting
-            exec stty $stty_settings
-            puts "\n================== Exiting command collection. ================== \n"
-            break
-        }
+            # Check for termination keywords (END or exit)
+            set trimmed_cmd [string trim $user_cmd]
+            if {$trimmed_cmd eq "END" || $trimmed_cmd eq "exit"} {
+                # Restore terminal settings before exiting
+                exec stty $stty_settings
+                puts "\n================== Exiting command collection. ================== \n"
+                break
+            }
 
-        # Add command to the list if it is not empty
-        if {$user_cmd ne ""} {
-            lappend commands_list $user_cmd
+            # Add command to the list if it is not empty
+            if {$user_cmd ne ""} {
+                lappend commands_list $user_cmd
+            }
         }
+        
+    } else {
+        # Scriptable mode - stdin is piped/redirected
+        puts "Scriptable mode: Reading commands from stdin"
+        puts "Type 'END' when finished"
+        puts "----------------------------------------"
+        
+        # Read commands from stdin line by line
+        while {[gets stdin line] >= 0} {
+            set line [string trim $line]
+            
+            # Skip empty lines and comments
+            if {$line eq "" || [string match "#*" $line]} {
+                continue
+            }
+            
+            # Check for END marker
+            if {$line eq "END"} {
+                break
+            }
+            
+            # Add command to list
+            lappend commands_list $line
+            puts "  > $line"
+        }
+        
+        puts "Commands loaded from stdin"
     }
 
     # Create a temporary playbook file with the collected commands
@@ -1372,6 +1497,24 @@ if {$mode == "--interactive"} {
         }
         
         puts "DEBUG: Using username: '$username' and password from secret file"
+        
+        # Check connectivity before spawning SSH
+        puts "Checking connectivity to $actual_hostname..."
+        if {[catch {exec ping -c 1 -W 1 $actual_hostname}]} {
+            puts "✗ Device $actual_hostname is not reachable"
+            puts "Creating unreachable notification..."
+            upload_unreachable_notification $actual_hostname $sr_number $cxd_token
+            
+            # Clean up temp files
+            if {[info exists temp_playbook] && [file exists $temp_playbook]} {
+                file delete $temp_playbook
+            }
+            if {[info exists hostfile] && [file exists $hostfile]} {
+                file delete $hostfile
+            }
+            exit 1
+        }
+        puts "✓ Device is reachable"
         
         # Setup logging
         set timestamp [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
