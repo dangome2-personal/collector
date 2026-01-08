@@ -9,7 +9,7 @@
 
 # Configuration
 COLLECTOR_DIR="/tmp/cisco/collector"
-SR_DIR="/tmp/cisco/collector/service_request"
+SR_DIR="/tmp/cisco/collector/service_requests"
 PROCESSED_LOG="/tmp/cisco/collector/.processed_srs"
 ERROR_LOG="/tmp/cisco/collector/.error_log"
 ARCHIVE_DIR="/tmp/cisco/collector/archive"
@@ -349,7 +349,7 @@ git_commit_and_push() {
     cd "$COLLECTOR_DIR" || return 1
     
     # File path relative to git repo root
-    local git_file_path="service_request/$filename"
+    local git_file_path="service_requests/$filename"
     
     while [ $attempt -le $MAX_RETRIES ]; do
         log_message "INFO" "Git operations for $git_file_path (attempt $attempt/$MAX_RETRIES)"
@@ -571,7 +571,7 @@ show_usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-Monitor /tmp/cisco/collector/service_request for new Service Request files and process them.
+Monitor /tmp/cisco/collector/service_requests for new Service Request files and process them.
 
 OPTIONS:
     -h, --help          Show this help message
