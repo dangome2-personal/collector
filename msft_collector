@@ -146,11 +146,11 @@ proc pull_out_file_from_device {banner messages_LC_list sr_number cxd_token host
         expect {
             "continue connecting (yes/no/\[fingerprint\])?" {
                 send "yes\r"
-                expect "assword:" { send "$password\r" }
+                expect "assword:" { send [format "%s\r" $password] }
                 log_user 1
             }
             "assword:" {
-                send "$password\r"
+                send [format "%s\r" $password]
             }
             timeout {
                 puts "================== SCP from $hostname timed out =================="
@@ -231,92 +231,77 @@ proc transfer_log_file {log_file sr_number cxd_token} {
     return $transfer_successful
 }
 
-################################################################################
-# Function: upload_unreachable_notification
-# Purpose: Create and upload notification when device is unreachable
+# Function to create and upload a notification log when a device is unreachable
+# This function performs diagnostics, creates a log file, and attempts to upload it
 # Parameters:
-#   - hostname: Device hostname
-#   - sr_number: Service request number
-#   - cxd_token: Authentication token
-################################################################################
-proc upload_unreachable_notification {hostname sr_number cxd_token} {
-    global env
+#   hostname: The target hostname or IP
+#   sr_number: Service request number
+#   cxd_token: Authentication token for upload
+#   mode: The mode that was being executed (e.g., "--interactive", "--playbook")
+#   reason: Brief reason for unreachability (e.g., "ping timeout")
+# Returns: 1 if upload successful, 0 otherwise (local file retained)
+proc upload_unreachable_notification {hostname sr_number cxd_token mode reason} {
+    global username
     
-    set timestamp [clock format [clock seconds] -format "%Y%m%d_%H%M%S"]
-    set username $env(USER)
+    # Generate timestamp for log file
+    set timestamp [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
+    set log_file "logs/NOT-REACHABLE-${hostname}_${timestamp}.log"
     
-    # Create NOT-REACHABLE log filename
-    set log_filename "NOT-REACHABLE-${hostname}_${timestamp}.log"
-    set local_log_path "/tmp/${log_filename}"
+    # Create the log file with diagnostic information
+    set log_fh [open $log_file w]
     
-    puts "\n=== Device Unreachable - Creating Diagnostic Log ==="
-    puts "Hostname: $hostname"
-    puts "SR Number: $sr_number"
-    puts "Log file: $log_filename"
+    # Write header information
+    puts $log_fh "================================================================================"
+    puts $log_fh "DEVICE UNREACHABLE NOTIFICATION"
+    puts $log_fh "================================================================================"
+    puts $log_fh "Timestamp:    [clock format [clock seconds] -format {%Y-%m-%d %H:%M:%S %Z}]"
+    puts $log_fh "Hostname:     $hostname"
+    puts $log_fh "Mode:         $mode"
+    puts $log_fh "SR Number:    $sr_number"
+    puts $log_fh "Username:     $username"
+    puts $log_fh "Reason:       $reason"
+    puts $log_fh "================================================================================"
+    puts $log_fh ""
     
-    # Create log file with diagnostic information
-    set log_fd [open $local_log_path w]
-    puts $log_fd "=========================================="
-    puts $log_fd "Device Unreachable Notification"
-    puts $log_fd "=========================================="
-    puts $log_fd "Timestamp: [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]"
-    puts $log_fd "Hostname: $hostname"
-    puts $log_fd "Service Request: $sr_number"
-    puts $log_fd "User: $username"
-    puts $log_fd "Mode: --interactive"
-    puts $log_fd ""
-    puts $log_fd "=========================================="
-    puts $log_fd "Connectivity Test Results"
-    puts $log_fd "=========================================="
-    puts $log_fd ""
-    
-    # Perform 3 ping attempts and log results
-    for {set i 1} {$i <= 3} {incr i} {
-        puts $log_fd "--- Ping Attempt $i/3 ---"
-        puts $log_fd "Command: ping -c 1 -W 1 $hostname"
-        
-        if {[catch {exec ping -c 1 -W 1 $hostname} ping_output]} {
-            puts $log_fd "Result: FAILED"
-            puts $log_fd "Output:"
-            puts $log_fd $ping_output
+    # Perform 3 ping attempts and capture results
+    puts $log_fh "CONNECTIVITY DIAGNOSTICS (3 ping attempts):"
+    puts $log_fh "--------------------------------------------------------------------------------"
+    for {set attempt 1} {$attempt <= 3} {incr attempt} {
+        puts $log_fh "\nPing Attempt $attempt:"
+        if {[catch {exec ping -c 1 -W 2 $hostname} ping_output]} {
+            puts $log_fh "Status: FAILED"
+            puts $log_fh "Output:\n$ping_output"
         } else {
-            puts $log_fd "Result: SUCCESS"
-            puts $log_fd "Output:"
-            puts $log_fd $ping_output
+            puts $log_fh "Status: SUCCESS"
+            puts $log_fh "Output:\n$ping_output"
         }
-        puts $log_fd ""
-        
-        if {$i < 3} {
+        # Small delay between attempts
+        if {$attempt < 3} {
             sleep 1
         }
     }
     
-    puts $log_fd "=========================================="
-    puts $log_fd "Conclusion"
-    puts $log_fd "=========================================="
-    puts $log_fd "Device $hostname is not reachable after 3 ping attempts."
-    puts $log_fd "Collection cannot proceed for SR $sr_number."
-    puts $log_fd ""
+    puts $log_fh "\n================================================================================"
+    puts $log_fh "END OF UNREACHABLE NOTIFICATION"
+    puts $log_fh "================================================================================"
+    close $log_fh
     
-    close $log_fd
+    puts "\n================== Created unreachable notification log: $log_file ==================\n"
     
-    puts "Diagnostic log created: $local_log_path"
+    # Attempt to upload the log file using existing transfer_log_file function
+    set upload_success [transfer_log_file $log_file $sr_number $cxd_token]
     
-    # Upload using existing transfer_log_file function (has retry logic built-in)
-    puts "Uploading unreachable notification to cxd.cisco.com..."
-    set upload_result [transfer_log_file $local_log_path $log_filename $cxd_token]
-    
-    if {$upload_result == 0} {
-        puts "✓ Unreachable notification uploaded successfully"
-        # Clean up local file only on successful upload
-        file delete $local_log_path
-        puts "✓ Local diagnostic file removed"
+    if {$upload_success} {
+        # Delete local file after successful upload
+        if {[file exists $log_file]} {
+            file delete $log_file
+            puts "================== Unreachable notification uploaded and local file removed ==================\n"
+        }
+        return 1
     } else {
-        puts "✗ Failed to upload unreachable notification"
-        puts "✗ Local file retained at: $local_log_path"
+        puts "================== Upload failed - notification log retained locally: $log_file ==================\n"
+        return 0
     }
-    
-    return $upload_result
 }
 
 # Function to generate timestamp in IOS-XR format: 2025-Dec-04.180630.UTC
@@ -474,7 +459,7 @@ proc execute_command {cmd prompt} {
     expect {
         -re "(P|p)assword:" {
             # Handle sudo password prompt
-            send "$::password\r"
+            send [format "%s\r" $::password]
             exp_continue
         }
         -re "$prompt" {
@@ -1158,24 +1143,20 @@ if {$mode == "--interactive"} {
     set sr_number [lindex $argv 1]
     set cxd_token [lindex $argv 2]
 
-    # Start interactive mode
-    puts "\n================== Entering interactive mode. Type 'END' when you are finished. ================== \n"
-    puts "================== Press Ctrl+C at any time to exit command collection. ================== \n"
-
     # List to store commands
     set commands_list {}
     # Note: Don't pre-add commands like "terminal length 0" as they may not work on all platforms (e.g., SONiC)
 
     set timeout -1
     
-    # Detect if stdin is a TTY (terminal) or pipe
+    # Detect if stdin is a TTY (interactive) or piped/redirected (scriptable)
     set is_tty [catch {exec test -t 0}]
+    set is_tty [expr {$is_tty == 0}]
     
-    if {$is_tty == 0} {
-        # Interactive mode - TTY detected
-        puts "Interactive mode: Enter commands one per line"
-        puts "Type 'END' when finished or press Ctrl+C to exit"
-        puts "----------------------------------------"
+    if {$is_tty} {
+        # ========== INTERACTIVE MODE (TTY) ==========
+        puts "\n================== Entering interactive mode. Type 'END' when you are finished. ================== \n"
+        puts "================== Press Ctrl+C at any time to exit command collection. ================== \n"
         
         # Save current terminal settings and configure for raw input
         set stty_settings [exec stty -g]
@@ -1196,7 +1177,7 @@ if {$mode == "--interactive"} {
             exit 0
         } SIGINT
         
-        # Collect commands from the user with backspace support
+        # Collect commands from the user interactively
         while {1} {
             # Display custom prompt
             send_user "\nMicrosoft Collector - Interactive> "
@@ -1253,33 +1234,31 @@ if {$mode == "--interactive"} {
                 lappend commands_list $user_cmd
             }
         }
-        
     } else {
-        # Scriptable mode - stdin is piped/redirected
-        puts "Scriptable mode: Reading commands from stdin"
-        puts "Type 'END' when finished"
-        puts "----------------------------------------"
+        # ========== SCRIPTABLE MODE (PIPED/REDIRECTED) ==========
+        puts "\n================== Entering scriptable mode. Reading commands from stdin. ================== \n"
         
-        # Read commands from stdin line by line
+        # Read commands line-by-line from stdin
         while {[gets stdin line] >= 0} {
-            set line [string trim $line]
+            set trimmed_line [string trim $line]
             
             # Skip empty lines and comments
-            if {$line eq "" || [string match "#*" $line]} {
+            if {$trimmed_line eq "" || [string index $trimmed_line 0] eq "#"} {
                 continue
             }
             
-            # Check for END marker
-            if {$line eq "END"} {
+            # Check for termination keywords (END or exit)
+            if {$trimmed_line eq "END" || $trimmed_line eq "exit"} {
+                puts "================== Reached END marker, stopping command collection. ================== \n"
                 break
             }
             
-            # Add command to list
-            lappend commands_list $line
-            puts "  > $line"
+            # Add command to the list
+            lappend commands_list $trimmed_line
+            puts "Collected command: $trimmed_line"
         }
         
-        puts "Commands loaded from stdin"
+        puts "================== Finished reading [llength $commands_list] commands from stdin. ================== \n"
     }
 
     # Create a temporary playbook file with the collected commands
@@ -1352,7 +1331,7 @@ if {$mode == "--interactive"} {
         if {[catch {exec ping -c 1 -W 1 $actual_hostname}]} {
             puts "✗ Device $actual_hostname is not reachable"
             puts "Creating unreachable notification..."
-            upload_unreachable_notification $actual_hostname $sr_number $cxd_token
+            upload_unreachable_notification $actual_hostname $sr_number $cxd_token "--interactive" "ping timeout"
             
             # Clean up temp files
             if {[info exists temp_playbook] && [file exists $temp_playbook]} {
@@ -1389,7 +1368,7 @@ if {$mode == "--interactive"} {
         expect {
             "assword:" {
                 puts "DEBUG: Password prompt detected, sending password..."
-                send "$password\r"
+                send [format "%s\r" $password]
                 puts "DEBUG: Password sent, waiting for response..."
 
                 expect {
@@ -1441,12 +1420,12 @@ if {$mode == "--interactive"} {
         # Stabilize input buffer after large output to prevent first-byte drop
         after 500
         
-        # Send terminal length 0 for all Cisco platforms (IOS, IOS-XE, IOS-XR, NX-OS) except SONiC
-        if {![regexp -nocase {sonic} $version_output]} {
-            puts "\n================== Detected Cisco platform, setting terminal length 0 ==================\n"
+        # Check if this is IOS-XR (not SONiC or NX-OS)
+        if {![regexp -nocase {sonic} $version_output] && ![regexp -nocase {NX-OS|Nexus} $version_output] && ([regexp {ncs5500} $version_output] || [regexp {8000} $version_output] || [regexp {IOS XR} $version_output])} {
+            puts "\n================== Detected IOS-XR platform, setting terminal length 0 ==================\n"
             execute_command "terminal length 0" "(\\r\\n|\\r).*#\\s*$|(\\r\\n|\\r).*\\$\\s*$|:.*\\$\\s*$"
         } else {
-            puts "\n================== SONiC platform detected, skipping terminal length 0 ==================\n"
+            puts "\n================== Non-IOS-XR platform detected (SONiC/NX-OS/Nexus), skipping terminal length 0 ==================\n"
         }
         
         # Execute each command from the temporary playbook
@@ -1635,7 +1614,7 @@ if {$mode == "--interactive"} {
     
         expect {
             "assword:" {
-                send "$password\r"
+                send [format "%s\r" $password]
                 expect -re ":.*\\$ |.*#"
             }
             timeout {
@@ -1776,7 +1755,7 @@ if {$mode == "--interactive"} {
     
         expect {
             "assword:" {
-                send "$password\r"
+                send [format "%s\r" $password]
                 expect -re ":.*\\$ |.*#"  ;# Expect the full prompt
             }
             timeout {
@@ -2017,7 +1996,7 @@ if {$mode == "--interactive"} {
                 }
                 "assword:" {
                     #puts "DEBUG: Got password prompt, sending password"
-                    send "$password\r"
+                    send [format "%s\r" $password]
                     exp_continue
                 }
                 -re "No such file" {
@@ -2128,7 +2107,7 @@ if {$mode == "--interactive"} {
         log_user 1
         expect {
             "assword:" {
-                send "$password\r"
+                send [format "%s\r" $password]
                 expect -re ":.*\\$ |.*#"  ;# Expect flexible prompt for IOS XR and SONiC
             }
             timeout {
@@ -2312,11 +2291,11 @@ if {$mode == "--interactive"} {
             expect {
                 "continue connecting (yes/no/\[fingerprint\])?" {
                     send "yes\r"
-                    expect "assword:" { send "$password\r" }
+                    expect "assword:" { send [format "%s\r" $password] }
                     # expect "assword:" { send "$tester\r" }
                 }
                 "assword:" {
-                    send "$password\r"
+                    send [format "%s\r" $password]
                     # send "tester\r"
                 }
                 timeout {
@@ -2401,7 +2380,7 @@ if {$mode == "--interactive"} {
         log_user 1
         expect {
             "assword:" {
-                send "$password\r"
+                send [format "%s\r" $password]
                 expect -re "RP/.*#"  ;# Expect the full prompt
             }
             timeout {
@@ -2506,7 +2485,7 @@ if {$mode == "--interactive"} {
                         exp_continue
                     }
                     "assword:" {
-                        send "$password\r"
+                        send [format "%s\r" $password]
                         exp_continue
                     }
                     "Connection reset by peer" {
