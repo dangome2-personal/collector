@@ -100,6 +100,35 @@ mark_processed() {
 }
 
 ################################################################################
+# Function: decrypt_field
+# Purpose: Decrypt Base64-encoded field with ENC: prefix
+# Args: $1 - field value (may be encrypted or plaintext)
+# Returns: Decrypted value or original if not encrypted
+################################################################################
+decrypt_field() {
+    local value="$1"
+    
+    # Check if value starts with ENC: prefix
+    if [[ "$value" =~ ^ENC: ]]; then
+        # Strip ENC: prefix and decode Base64
+        local encoded="${value#ENC:}"
+        local decoded
+        
+        # Attempt Base64 decode with error handling
+        if decoded=$(echo "$encoded" | base64 -d 2>/dev/null); then
+            echo "$decoded"
+        else
+            # Decryption failed, log warning and return original
+            log_message "WARN" "Failed to decode Base64 value, using original: ${value:0:20}..."
+            echo "$value"
+        fi
+    else
+        # Not encrypted, return as-is
+        echo "$value"
+    fi
+}
+
+################################################################################
 # Function: validate_file_format
 # Purpose: Validate that file contains expected format (old or new)
 # Returns: 0 if valid, 1 if invalid
@@ -130,10 +159,11 @@ validate_file_format() {
             return 1
         fi
         
-        # Extract and validate SR number
+        # Extract and validate SR number (accept encrypted or plaintext)
         local sr_number=$(grep "^Service Request:\|^SR:" "$file" | head -n 1 | sed 's/^Service Request: *//;s/^SR: *//' | tr -d ' ')
-        if ! [[ "$sr_number" =~ ^[0-9]{9}$ ]]; then
-            log_message "ERROR" "Invalid SR number format in $file: $sr_number (expected 9 digits)"
+        # Accept either ENC:base64 format or 9-digit plaintext
+        if ! [[ "$sr_number" =~ ^ENC:[A-Za-z0-9+/=]+$ ]] && ! [[ "$sr_number" =~ ^[0-9]{9}$ ]]; then
+            log_message "ERROR" "Invalid SR number format in $file: $sr_number (expected 9 digits or ENC:base64)"
             return 1
         fi
         
@@ -194,6 +224,10 @@ parse_sr_file() {
         HOSTNAME=$(grep "^Hostname:\|^Host:" "$file" | head -n 1 | sed 's/^Hostname: *//;s/^Host: *//' | xargs)
         CXD_TOKEN=$(grep "^CXD Token:\|^Token:" "$file" | head -n 1 | sed 's/^CXD Token: *//;s/^Token: *//' | xargs)
         
+        # Decrypt SR_NUMBER and HOSTNAME if encrypted (CXD_TOKEN is always plaintext)
+        SR_NUMBER=$(decrypt_field "$SR_NUMBER")
+        HOSTNAME=$(decrypt_field "$HOSTNAME")
+        
         # Parse optional Mode field
         if grep -q "^Mode:" "$file"; then
             MODE=$(grep "^Mode:" "$file" | head -n 1 | sed 's/^Mode: *//' | xargs)
@@ -204,7 +238,7 @@ parse_sr_file() {
         if grep -q "^Playbook-Start:" "$file"; then
             log_message "INFO" "Playbook detected in file"
             
-            # Create temporary playbook file
+            # Create temporary playbook file (using decrypted SR_NUMBER)
             PLAYBOOK_FILE="/tmp/msft_collector_playbook_${SR_NUMBER}_$(date +%s).txt"
             
             # Extract commands between Playbook-Start: and Playbook-End:
@@ -228,7 +262,7 @@ parse_sr_file() {
         CXD_TOKEN=$(echo "$content" | awk '{print $3}')
     fi
     
-    log_message "INFO" "Parsed: hostname=$HOSTNAME, SR=$SR_NUMBER, token=${CXD_TOKEN:0:5}..., mode=${MODE:-default}"
+    log_message "INFO" "Parsed SR file: SR=$SR_NUMBER, hostname=$HOSTNAME, mode=${MODE:-default}"
 }
 
 ################################################################################
@@ -396,6 +430,7 @@ git_commit_and_push() {
 ################################################################################
 # Function: archive_file
 # Purpose: Move processed file to archive directory
+# For successful status, decrypts SR/Hostname fields for debugging
 ################################################################################
 archive_file() {
     local filename="$1"
@@ -404,15 +439,80 @@ archive_file() {
     
     local timestamp=$(date '+%Y%m%d_%H%M%S')
     local archive_name="${sr_number}_${timestamp}_${status}"
+    local source_file=""
     
-    # Try to move from SR_DIR first, then fallback to COLLECTOR_DIR
+    # Find source file location
     if [ -f "$SR_DIR/$filename" ]; then
-        if mv "$SR_DIR/$filename" "$ARCHIVE_DIR/$archive_name"; then
-            log_message "INFO" "Archived $filename as $archive_name"
-            return 0
-        fi
+        source_file="$SR_DIR/$filename"
     elif [ -f "$COLLECTOR_DIR/$filename" ]; then
-        if mv "$COLLECTOR_DIR/$filename" "$ARCHIVE_DIR/$archive_name"; then
+        source_file="$COLLECTOR_DIR/$filename"
+    else
+        log_message "ERROR" "Source file not found for archiving: $filename"
+        return 1
+    fi
+    
+    # For successful collections, decrypt the archive for debugging
+    if [ "$status" = "success" ]; then
+        log_message "INFO" "Decrypting archive for successful SR $sr_number"
+        
+        # Read and decrypt the file content
+        local temp_file="${ARCHIVE_DIR}/${archive_name}.tmp"
+        local decrypt_success=true
+        
+        if [ -f "$source_file" ]; then
+            # Process each line, decrypting SR and Hostname fields
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^(Service\ Request:|SR:) ]]; then
+                    local sr_value=$(echo "$line" | sed 's/^Service Request: *//;s/^SR: *//')
+                    local decrypted_sr=$(decrypt_field "$sr_value")
+                    if [[ "$sr_value" =~ ^ENC: ]]; then
+                        echo "Service Request: $decrypted_sr" >> "$temp_file" || decrypt_success=false
+                    else
+                        echo "$line" >> "$temp_file" || decrypt_success=false
+                    fi
+                elif [[ "$line" =~ ^(Hostname:|Host:) ]]; then
+                    local host_value=$(echo "$line" | sed 's/^Hostname: *//;s/^Host: *//')
+                    local decrypted_host=$(decrypt_field "$host_value")
+                    if [[ "$host_value" =~ ^ENC: ]]; then
+                        echo "Hostname: $decrypted_host" >> "$temp_file" || decrypt_success=false
+                    else
+                        echo "$line" >> "$temp_file" || decrypt_success=false
+                    fi
+                else
+                    # Copy all other lines as-is (CXD Token, Mode, Playbook, etc.)
+                    echo "$line" >> "$temp_file" || decrypt_success=false
+                fi
+            done < "$source_file"
+            
+            if [ "$decrypt_success" = true ] && [ -f "$temp_file" ]; then
+                # Move decrypted file to archive
+                if mv "$temp_file" "$ARCHIVE_DIR/$archive_name"; then
+                    rm -f "$source_file"
+                    log_message "INFO" "Archived $filename as $archive_name (decrypted)"
+                    return 0
+                else
+                    rm -f "$temp_file"
+                    decrypt_success=false
+                fi
+            else
+                rm -f "$temp_file"
+                decrypt_success=false
+            fi
+        else
+            decrypt_success=false
+        fi
+        
+        # Fallback: if decryption failed, archive the encrypted file
+        if [ "$decrypt_success" = false ]; then
+            log_message "WARN" "Failed to decrypt archive, moving encrypted file for SR $sr_number"
+            if mv "$source_file" "$ARCHIVE_DIR/$archive_name"; then
+                log_message "INFO" "Archived $filename as $archive_name (encrypted)"
+                return 0
+            fi
+        fi
+    else
+        # For failed/duplicate/invalid status, move file as-is (keep encrypted)
+        if mv "$source_file" "$ARCHIVE_DIR/$archive_name"; then
             log_message "INFO" "Archived $filename as $archive_name"
             return 0
         fi
@@ -606,6 +706,18 @@ FILES:
     show platform
     Playbook-End:
     Timestamp: 2026-01-05T22:50:59.395488
+    
+    ENCRYPTED FORMAT (Service Request and Hostname encrypted with Base64):
+    Service Request: ENC:NzAwMjQ1NTY1
+    Hostname: ENC:cGh4ODAtMDEwMS0wMzAwLTAydDI=
+    CXD Token: YG9Jg0glnNSbeQki
+    Mode: interactive
+    Playbook-Start:
+    show version
+    Playbook-End:
+    
+    Note: CXD Token is always plaintext, only SR and Hostname use ENC: prefix
+    Successful archives are automatically decrypted for debugging
     
     Optional Fields:
     - Mode: interactive, --playbook, --showtech, --archive-log (default: lc-fc.playbook)
